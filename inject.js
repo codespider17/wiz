@@ -428,12 +428,20 @@ function getSkillCore(skill) {
 function loadPreviousEpisode() {
   try {
     const files = fs.readdirSync(EPISODIC_DIR)
-      .filter(f => f.endsWith('.json'))
+      .filter(f => f.endsWith('.json') && !f.startsWith('quick_'))
       .map(f => ({ name: f, mtime: fs.statSync(path.join(EPISODIC_DIR, f)).mtime }))
       .sort((a, b) => b.mtime - a.mtime)
-    if (files.length < 1) return null
-    const data = JSON.parse(fs.readFileSync(path.join(EPISODIC_DIR, files[0].name), 'utf-8'))
-    return data.summary || null
+    for (const f of files) {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(EPISODIC_DIR, f.name), 'utf-8'))
+        const s = (data.summary || '').trim()
+        // Skip quick_worker noise (contains ||| delimiters) and empty/short summaries
+        if (!s || s.length < 20 || s.includes('|||')) continue
+        if (s.startsWith('{') || s.startsWith('[')) continue
+        return s
+      } catch(e) { continue }
+    }
+    return null
   } catch(e) { return null }
 }
 

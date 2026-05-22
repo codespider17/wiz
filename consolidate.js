@@ -265,6 +265,27 @@ ${context.substring(0, 2000)}`
         const epFile = path.join(ROOT, 'memory', 'episodic', `${sessionId}.json`)
         fs.writeFileSync(epFile, JSON.stringify(epData, null, 2), 'utf-8')
         process.stdout.write(`[overmind] episode saved: ${epSummary.substring(0, 80)}...\n`)
+
+        // Update injection.md directly so next session has fresh context even if inject.js fails
+        try {
+          const injFile = path.join(ROOT, 'injection.md')
+          if (fs.existsSync(injFile)) {
+            let injContent = fs.readFileSync(injFile, 'utf-8')
+            const epLine = epSummary.trim().substring(0, 300)
+            if (injContent.includes('## 上次对话')) {
+              injContent = injContent.replace(/## 上次对话[\s\S]*?(?=\n## |\n---|\n> |$)/,
+                `## 上次对话\n${epLine}`)
+            } else {
+              // Insert after 项目上下文 section
+              injContent = injContent.replace(/(## 项目上下文\n[^\n]+\n)/,
+                `$1\n## 上次对话\n${epLine}\n`)
+            }
+            fs.writeFileSync(injFile, injContent, 'utf-8')
+            process.stdout.write(`[overmind] injection.md updated with episode\n`)
+          }
+        } catch(e) {
+          process.stdout.write(`[overmind] injection.md update skipped: ${e.message}\n`)
+        }
       }
     } catch(e) {
       process.stdout.write(`[overmind] episode summary failed: ${e.message}\n`)
