@@ -528,10 +528,10 @@ async function main() {
 
   if (!workerAlive) {
     const { spawn } = require('child_process')
-    const worker = spawn('wscript.exe', [path.join(ROOT, 'launcher.vbs')], {
+    const worker = spawn(process.execPath, [path.join(ROOT, 'start-worker.js')], {
       stdio: 'ignore',
       detached: true,
-      windowsHide: true
+      cwd: ROOT
     })
     worker.unref()
     var workerSpawned = true
