@@ -105,6 +105,21 @@ ${context.substring(0, 2000)}`
         const epFile = path.join(ROOT, 'memory', 'episodic', `${sessionId}.json`)
         fs.writeFileSync(epFile, JSON.stringify(epData, null, 2), 'utf-8')
         process.stdout.write(`[overmind] episode saved: ${epSummary.substring(0, 80)}...\n`)
+
+        // Write last session context to auto-memory for cross-session continuity
+        try {
+          const lastLines = context.split('\n').filter(Boolean).slice(-10)
+          const lastUserMsg = (lastLines.filter(l => l.startsWith('[user]')).pop() || '').replace(/^\[user\]\s*/, '').substring(0, 200)
+          const lastAssistantMsg = (lastLines.filter(l => l.startsWith('[assistant]')).pop() || '').replace(/^\[assistant\]\s*/, '').substring(0, 200)
+          const firstSentence = epSummary.trim().split(/[。！\n]/)[0]
+          const body = `上一句: ${lastUserMsg || firstSentence}
+此前: ${firstSentence || epSummary.trim().substring(0, 150)}
+上次: ${lastAssistantMsg || context.split('\n').pop()?.substring(0, 200) || ''}`
+          transcriptLib.saveAutoMemory('wiz_last_session', 'Wiz last session summary', 'project', body)
+          process.stdout.write(`[overmind] auto-memory wiz_last_session updated\n`)
+        } catch(amErr) {
+          process.stdout.write(`[overmind] auto-memory write failed: ${amErr.message}\n`)
+        }
       }
     } catch(e) {
       process.stdout.write(`[overmind] episode summary failed: ${e.message}\n`)
@@ -320,9 +335,13 @@ function cleanEpisodic() {
       } catch(e) {}
       fs.unlinkSync(filePath)
       deleted++
-    } else if (age > 30 * DAY && file.startsWith('quick_')) {
+    } else if (age > 30 * DAY) {
+      // Merge oldest files in same ISO week bucket when 30+ days old
       const d = new Date(stat.mtimeMs)
-      const weekKey = `${d.getFullYear()}-W${Math.ceil(d.getDate() / 7)}`
+      // Convert to ISO week number: getWeekOfYear
+      const startOfYear = new Date(d.getFullYear(), 0, 1)
+      const weekNum = Math.ceil((((d - startOfYear) / 86400000) + startOfYear.getDay() + 1) / 7)
+      const weekKey = `${d.getFullYear()}-W${String(weekNum).padStart(2, '0')}`
       if (!weekBuckets[weekKey]) weekBuckets[weekKey] = []
       weekBuckets[weekKey].push(filePath)
     }
