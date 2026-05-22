@@ -28,10 +28,24 @@ class Launcher {
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
             UseShellExecute = false,
-            WorkingDirectory = dir
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true
         };
 
-        using (var p = Process.Start(psi)) { }
+        using (var p = Process.Start(psi)) {
+            // Drain stdio to prevent console allocation for the node process.
+            // Redirecting all three standard handles tells Windows this process
+            // doesn't need a console — even though node.exe is a console subsystem
+            // executable, CreateProcessW honors CREATE_NO_WINDOW when std handles
+            // are explicitly provided.
+            if (p != null) {
+                p.StandardOutput.Close();
+                p.StandardError.Close();
+                p.StandardInput.Close();
+            }
+        }
     }
 
     static string FindNode() {
