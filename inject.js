@@ -285,6 +285,7 @@ function getUserTask() {
 
     // System command patterns to skip — env vars, exports, shell config
     const SYSTEM_CMD_RE = /^(export\s+|set\s+|setx\s+|unset\s+|alias\s+|[A-Z_]+=)/i
+    const ENV_VAR_RE = /^[A-Z_][A-Z0-9_]+=[0-9A-Za-z_\/\.\-]*$/
 
     // ---- Signal-based task detection (replaces old deny-list NON_TASK_RE) ----
     // Project signals — positive indicators this is a development task
@@ -321,7 +322,7 @@ function getUserTask() {
         if (text && text.includes('This session is being continued')) continue
         if (text && text.includes('Primary Request and Intent:')) continue
         if (text && /^Continue from where you left off/.test(text)) continue
-        if (text) userMsgs.push({ text: text.substring(0, 300), isSystem: SYSTEM_CMD_RE.test(text), isProject: isProjectTask(text) })
+        if (text) userMsgs.push({ text: text.substring(0, 300), isSystem: SYSTEM_CMD_RE.test(text) || ENV_VAR_RE.test(text.trim()), isProject: isProjectTask(text) })
       } catch(e) {}
     }
     // Filter strategy: prefer last project-relevant message

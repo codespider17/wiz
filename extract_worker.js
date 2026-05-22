@@ -162,12 +162,15 @@ ${getExistingKeys()}
       } catch(e) {}
     }
 
-    // Regenerate injection.md with latest context
-    try {
-      const injectJS = path.join(ROOT, 'inject.js')
-      const { execSync } = require('child_process')
-      execSync(`node "${injectJS}"`, { timeout: 5000, windowsHide: true })
-    } catch(e) {}
+    // Regenerate injection.md only if new facts were actually saved
+    // (avoids overwriting injection.md with stale context when no real conversation happened)
+    if (saved > 0) {
+      try {
+        const injectJS = path.join(ROOT, 'inject.js')
+        const { execSync } = require('child_process')
+        execSync(`node "${injectJS}"`, { timeout: 5000, windowsHide: true })
+      } catch(e) {}
+    }
 
     // ---- GRAPH: Extract relationships from conversation ----
     try {

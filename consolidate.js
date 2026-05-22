@@ -55,10 +55,36 @@ async function consolidate() {
   const sessionId = `s${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
   const stats = index.getStats()
 
-  // Read current injection for context
-  const injFile = path.join(ROOT, 'injection.md')
+  // Read current session context from transcript — NOT from injection.md (which may be stale/overwritten)
+  const transcriptLib = require(path.join(ROOT, 'lib', 'transcript'))
+  const latestFile = transcriptLib.findLatest()
   let context = ''
-  try { context = fs.readFileSync(injFile, 'utf-8').substring(0, 3000) } catch(e) {}
+  if (latestFile) {
+    const rawLines = transcriptLib.readTail(latestFile.path, 100)
+    context = rawLines.map(l => {
+      try {
+        const entry = JSON.parse(l)
+        const msg = entry.message || {}
+        const role = msg.role || 'unknown'
+        let content = ''
+        if (typeof msg.content === 'string') content = msg.content
+        else if (Array.isArray(msg.content)) {
+          const tb = msg.content.find(b => b.type === 'text')
+          if (tb) content = tb.text
+        }
+        if (!content || content.includes('parentUuid') || content.includes('sidechain')) return null
+        return `[${role}] ${content.substring(0, 300)}`
+      } catch(e) { return null }
+    }).filter(Boolean).slice(-30).join('\n')
+    // Skip episode generation if context is mostly env vars / non-conversational noise
+    if (context) {
+      const envVarLines = context.split('\n').filter(l => /^\[(user|assistant)\]\s*[A-Z_][A-Z0-9_]+=/.test(l)).length
+      const totalLines = context.split('\n').filter(Boolean).length
+      if (totalLines > 0 && envVarLines / totalLines > 0.5) {
+        context = '' // mostly env var commands, not real conversation
+      }
+    }
+  }
 
   // Generate episode summary via AI for session continuity
   if (context && isValidContent(context, 50)) {
