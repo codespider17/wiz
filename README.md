@@ -246,10 +246,15 @@ pip install jieba
 ### 2. 编译 launcher.exe（零窗口启动的关键）
 
 ```bash
-# 需要安装 .NET SDK 或 Mono
-csc launcher.cs /out:launcher.exe
-# 或在 VS 开发者命令提示符中运行
+# 需要安装 .NET SDK 或 Mono。在 VS 开发者命令提示符或安装了 .NET SDK 的终端中运行
+csc /target:winexe launcher.cs /out:launcher.exe
 ```
+
+> **`/target:winexe` 是关键**：如果不加此标志，编译产物是控制台应用程序，
+> Windows 每次启动时都会短暂分配控制台窗口再隐藏，形成闪一下的弹窗。
+> 加上 `/target:winexe` 后，OS 根本不会为它创建控制台窗口。
+
+也可以直接运行项目根目录的 `build_launcher.bat`（无需手动敲命令）。
 
 如果不想编译 C#，可以使用系统自带的 VBS 包装（会有一个 cmd 瞬间闪过）。
 
