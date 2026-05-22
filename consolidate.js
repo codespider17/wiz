@@ -270,7 +270,7 @@ ${context.substring(0, 2000)}`
   // Auto-run hermes_fusion every ~5 sessions to keep memory healthy
   let lastCount = 0
   try { lastCount = parseInt(fs.readFileSync(HERMES_COUNT_FILE, 'utf-8')) } catch(e) {}
-  if (stats.semanticCount > lastCount + 300) {
+  if (stats.semanticCount > lastCount + 50 && stats.semanticCount > lastCount * 1.15) {
     try {
       const { execSync } = require('child_process')
       const pyCmd = 'import daemon,json; print(json.dumps(daemon.hermes_fusion()))'
@@ -284,8 +284,61 @@ ${context.substring(0, 2000)}`
     }
   }
 
+  // Episodic tiered retention
+  cleanEpisodic()
+
+  // JS-side pruneIneffective as backup (Python hermes_fusion may not run every session)
+  const pruned = index.pruneIneffective()
+  if (pruned > 0) process.stdout.write(`[overmind] JS prune: removed ${pruned} ineffective memories\n`)
+
   const afterStats = index.getStats()
   process.stdout.write(`[overmind] session ${sessionId} done | mems: ${stats.semanticCount}→${afterStats.semanticCount} | episode: saved\n`)
+}
+
+// Tiered retention for episodic memories
+function cleanEpisodic() {
+  const episodicDir = path.join(ROOT, 'memory', 'episodic')
+  if (!fs.existsSync(episodicDir)) return
+  const now = Date.now()
+  const DAY = 86400000
+  const criticalKeywords = /决策|架构|根因|方案|决定|修复|原因|design|architecture|root.cause|decision/i
+
+  const files = fs.readdirSync(episodicDir).filter(f => f.endsWith('.json'))
+  let deleted = 0, merged = 0
+  const weekBuckets = {}
+
+  for (const file of files) {
+    const filePath = path.join(episodicDir, file)
+    let stat
+    try { stat = fs.statSync(filePath) } catch(e) { continue }
+    const age = now - stat.mtimeMs
+
+    if (age > 90 * DAY) {
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8')
+        if (criticalKeywords.test(content)) continue
+      } catch(e) {}
+      fs.unlinkSync(filePath)
+      deleted++
+    } else if (age > 30 * DAY && file.startsWith('quick_')) {
+      const d = new Date(stat.mtimeMs)
+      const weekKey = `${d.getFullYear()}-W${Math.ceil(d.getDate() / 7)}`
+      if (!weekBuckets[weekKey]) weekBuckets[weekKey] = []
+      weekBuckets[weekKey].push(filePath)
+    }
+  }
+
+  for (const weekFiles of Object.values(weekBuckets)) {
+    if (weekFiles.length <= 1) continue
+    weekFiles.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs)
+    for (let i = 0; i < weekFiles.length - 1; i++) {
+      try { fs.unlinkSync(weekFiles[i]); merged++ } catch(e) {}
+    }
+  }
+
+  if (deleted > 0 || merged > 0) {
+    process.stdout.write(`[overmind] episodic: deleted ${deleted}, merged ${merged}\n`)
+  }
 }
 
 const HERMES_COUNT_FILE = path.join(ROOT, '.hermes_counter')
