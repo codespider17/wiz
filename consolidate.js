@@ -60,7 +60,7 @@ async function consolidate() {
   const latestFile = transcriptLib.findLatest()
   let context = ''
   if (latestFile) {
-    const rawLines = transcriptLib.readTail(latestFile.path, 100)
+    const rawLines = transcriptLib.readTail(latestFile.path, 300)
     context = rawLines.map(l => {
       try {
         const entry = JSON.parse(l)
@@ -73,9 +73,9 @@ async function consolidate() {
           if (tb) content = tb.text
         }
         if (!content || content.includes('parentUuid') || content.includes('sidechain')) return null
-        return `[${role}] ${content.substring(0, 300)}`
+        return `[${role}] ${content.substring(0, 500)}`
       } catch(e) { return null }
-    }).filter(Boolean).slice(-30).join('\n')
+    }).filter(Boolean).slice(-100).join('\n')
     // Skip episode generation if context is mostly env vars / non-conversational noise
     if (context) {
       const envVarLines = context.split('\n').filter(l => /^\[(user|assistant)\]\s*[A-Z_][A-Z0-9_]+=/.test(l)).length
