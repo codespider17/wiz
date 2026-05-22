@@ -1,1 +1,5 @@
-CreateObject("WScript.Shell").Run "C:\Users\不见根号\wiz\launcher.exe inject.js", 0, False
+Set ws = CreateObject("WScript.Shell")
+Set proc = ws.Exec("cmd /c start /B launcher.exe inject.js")
+proc.StdIn.Close
+proc.StdOut.Close
+proc.StdErr.Close
