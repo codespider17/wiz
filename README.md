@@ -87,6 +87,16 @@ time_decay = max(0.4, 1.0 − days_since_update × 0.02)
 - **任务去重**: `event_log.js` 自动跳过连续相同的 task 记录，避免任务栈污染
 - **Worker PID 自愈**: `start-worker.js` 先检测已有进程，避免重复启动
 
+### 记忆防污染（v2.0.2）
+
+会话记忆被环境变量命令和 injection.md 覆盖的问题，三个维度根治：
+
+| 防线 | 文件 | 机制 |
+|------|------|------|
+| 入口过滤 | `inject.js` | 裸 `GH_TOKEN=0` 这类环境变量赋值被 `ENV_VAR_RE` 正则识别，标记为系统消息而非任务上下文 |
+| 会话来源 | `consolidate.js` | 从 transcript JSONL 原始转录读取真实对话（而非可能被重写的 injection.md），跳过 >50% 行是环境变量的噪声 |
+| 条件重写 | `extract_worker.js` | 仅当提取到新 facts（saved > 0）时才重跑 inject.js，避免无意义覆盖 |
+
 ### 运行时数据
 
 | 指标 | 数值 |
@@ -184,9 +194,12 @@ launcher.exe (C#, CreateNoWindow=true)
   │     ├─ 调用 flash API 提取事实 → memory.db
   │     ├─ 关系提取 → graph.db
   │     ├─ 技能偏好检测 → skill_prefs
+  │     ├─ 条件重写 injection.md（仅当有新 facts 时）
   │     └─ SessionEnd 检测 → consolidate.js
   │
   └─ consolidate.js
+        ├─ 从 transcript 读取会话上下文（非可能被污染的 injection.md）
+        ├─ 环境变量噪声检测（>50% 行是 env var 则跳过）
         ├─ 内容验证 (isValidContent 过滤系统噪声)
         ├─ 生成情景摘要
         ├─ 事实提取 + 去重
