@@ -84,9 +84,13 @@ function trimEvents() {
 function pushTask(task, sessionId = '') {
   try {
     const d = getDb()
+    // Dedup: skip if last task is identical
+    const last = d.prepare('SELECT task FROM task_stack ORDER BY id DESC LIMIT 1').get()
+    const taskStr = String(task).substring(0, 200)
+    if (last && last.task === taskStr) return
     const ts = new Date().toISOString()
     d.prepare('INSERT INTO task_stack (task, pushed_at, session) VALUES (?, ?, ?)')
-      .run(String(task).substring(0, 200), ts, sessionId)
+      .run(taskStr, ts, sessionId)
     const count = d.prepare('SELECT COUNT(*) as c FROM task_stack').get().c
     if (count > MAX_STACK_DEPTH) {
       const toDelete = count - MAX_STACK_DEPTH

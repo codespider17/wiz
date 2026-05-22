@@ -57,7 +57,11 @@ const NOISE_PATTERNS = [
 
 function isNoise(content) {
   if (!content) return true
-  if (content.length < 15) return true
+  // Chinese text is information-dense: a 10-char Chinese phrase carries
+  // as much meaning as ~30 English chars. Use a lower threshold for CJK.
+  const hasCJK = /[一-鿿㐀-䶿]/.test(content)
+  const minLen = hasCJK ? 8 : 15
+  if (content.length < minLen) return true
   for (const p of NOISE_PATTERNS) {
     if (p.test(content)) return true
   }

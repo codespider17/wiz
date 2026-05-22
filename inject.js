@@ -23,7 +23,7 @@ function writeInjection(content) {
       if (e.code === 'EEXIST') {
         const t = fs.statSync(LOCK_FILE).mtimeMs
         if (Date.now() - t > 5000) { fs.unlinkSync(LOCK_FILE) }
-        require('child_process').execSync('sleep 0.05')
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
       } else { throw e }
     }
   }
@@ -283,9 +283,28 @@ function getUserTask() {
     const raw = fs.readFileSync(latest, 'utf-8')
     const lines = raw.split('\n').filter(Boolean)
 
-    // Collect last 3 user messages from tail, return longest (usually the task)
+    // System command patterns to skip — env vars, exports, shell config
+    const SYSTEM_CMD_RE = /^(export\s+|set\s+|setx\s+|unset\s+|alias\s+|[A-Z_]+=)/i
+
+    // ---- Signal-based task detection (replaces old deny-list NON_TASK_RE) ----
+    // Project signals — positive indicators this is a development task
+    const PROJECT_SIGNAL_RE = /\b(function|class|import|export|const|let|var|npm|git|node|python|error|bug|fix|test|api|http|db|sql|config|hook|async|await|module|require)\b|\/(\/|\*)|(报错|错误|异常|bug|接口|函数|变量|数据库|配置|部署|缓存|token|auth|登录|验证|权限|组件|路由|状态|重构|优化|性能|监控|日志|编译|构建|打包|发布|回滚|安装|打不开|不能用)|^(npm|yarn|pip|go|rust|docker|git|node|python|npx)\s/i
+    // Casual signals — skip these, they're not project tasks
+    const CASUAL_SIGNAL_RE = /^(你[好叫是谁]|hi\b|hello\b|早安|晚安|test\b)/i
+
+    function isProjectTask(text) {
+      if (!text || text.length < 3) return false
+      if (CASUAL_SIGNAL_RE.test(text)) return false
+      if (PROJECT_SIGNAL_RE.test(text)) return true
+      // Short (<50 chars) with no project signals → likely casual, skip
+      if (text.length < 50) return false
+      // Long enough, no casual signal, no project signal → keep (might be descriptive)
+      return true
+    }
+
+    // Collect last 5 user messages from tail
     const userMsgs = []
-    for (let i = lines.length - 1; i >= 0 && userMsgs.length < 3; i--) {
+    for (let i = lines.length - 1; i >= 0 && userMsgs.length < 5; i--) {
       try {
         const entry = JSON.parse(lines[i])
         if (entry.type !== 'user') continue
@@ -302,12 +321,17 @@ function getUserTask() {
         if (text && text.includes('This session is being continued')) continue
         if (text && text.includes('Primary Request and Intent:')) continue
         if (text && /^Continue from where you left off/.test(text)) continue
-        if (text) userMsgs.push(text.substring(0, 300))
+        if (text) userMsgs.push({ text: text.substring(0, 300), isSystem: SYSTEM_CMD_RE.test(text), isProject: isProjectTask(text) })
       } catch(e) {}
     }
-    // Return longest message (likely the task), or the last one
-    userMsgs.sort((a, b) => b.length - a.length)
-    return userMsgs[0] || null
+    // Filter strategy: prefer last project-relevant message
+    const projectTask = userMsgs.find(m => !m.isSystem && m.isProject)
+    if (projectTask) return projectTask.text
+    // Fallback: first non-system message
+    const anyNonSystem = userMsgs.find(m => !m.isSystem)
+    if (anyNonSystem) return anyNonSystem.text
+    // Last resort: return the most recent message
+    return userMsgs[0] ? userMsgs[0].text : null
   } catch(e) { return null }
 }
 
@@ -548,6 +572,7 @@ async function main() {
     const worker = spawn(process.execPath, [path.join(ROOT, 'start-worker.js')], {
       stdio: 'ignore',
       detached: true,
+      windowsHide: true,
       cwd: ROOT
     })
     worker.unref()

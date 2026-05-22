@@ -24,6 +24,7 @@ if (fs.existsSync(PID_FILE)) {
 const child = spawn(process.execPath, [WORKER_JS], {
   detached: true,
   stdio: "ignore",
+  windowsHide: true,
   cwd: __dirname,
 });
 child.unref();

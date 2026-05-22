@@ -18,3 +18,5 @@ health_check.py
 .hermes_counter
 .injector.lock
 .injection.lock
+.worker.heartbeat
+launcher.exe

@@ -359,7 +359,7 @@ function getAllSkills() {
 
 function getAllMemoryKeys() {
   if (!db) init()
-  return db.prepare("SELECT key, content, tags, COALESCE(confidence,0.5) as confidence, COALESCE(effectiveness_score,0.5) as effectiveness_score, COALESCE(injected_count,0) as injected_count, COALESCE(ineffective_count,0) as ineffective_count FROM semantic WHERE key != '_schema_version'").all()
+  return db.prepare("SELECT key, content, tags, COALESCE(confidence,0.5) as confidence, COALESCE(effectiveness_score,0.5) as effectiveness_score, COALESCE(injected_count,0) as injected_count, COALESCE(ineffective_count,0) as ineffective_count, updated_at FROM semantic WHERE key != '_schema_version'").all()
 }
 
 // ---- EVOLUTION ----
@@ -462,8 +462,9 @@ function detectMemoryReferences(injectedKeys, transcriptSnippet) {
   return refs
 }
 
-// Apply effectiveness-based ranking boost to memories
+// Apply effectiveness-based ranking boost to memories + time decay
 function rankByEffectiveness(memories) {
+  const now = Date.now()
   return memories.map(m => {
     const eff = (m.effectiveness_score || 0.5)
     const inj = (m.injected_count || 0)
@@ -471,8 +472,16 @@ function rankByEffectiveness(memories) {
     // Bayesian-smoothed score: start at 0.5, move based on evidence
     const total = inj + neff + 1
     const smoothed = (0.5 * 1 + eff * inj + 0.1 * neff) / (total)
-    const boost = smoothed * 0.3 + (inj > 0 ? 0.1 : 0)  // small boost just for being selected before
-    return { ...m, feedback_score: Math.min(1.0, (m.combined || m.confidence || 0.5) + boost) }
+    const boost = smoothed * 0.3 + (inj > 0 ? 0.1 : 0)
+
+    // Time decay: memories not accessed recently lose score
+    // 2% decay per day since last update, floor at 0.4
+    let decay = 1.0
+    if (m.updated_at) {
+      const days = (now - new Date(m.updated_at + 'Z').getTime()) / 86400000
+      decay = Math.max(0.4, 1 - days * 0.02)
+    }
+    return { ...m, feedback_score: Math.min(1.0, ((m.combined || m.confidence || 0.5) + boost) * decay) }
   }).sort((a, b) => (b.feedback_score || 0) - (a.feedback_score || 0))
 }
 

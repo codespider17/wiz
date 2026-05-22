@@ -5,6 +5,20 @@ const https = require('https')
 const ROOT = path.dirname(__filename)
 const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || 'YOUR_DEEPSEEK_API_KEY'
 
+// Content validation: skip system error messages and non-project content
+function isValidContent(text, minLen = 20) {
+  if (!text || text.length < minLen) return false
+  const rejectPatterns = [
+    /The user doesn't want to proceed with this tool use/i,
+    /The tool use was rejected/i,
+    /was NOT written to the file/i,
+    /STOP what you are doing/i,
+    /wait for the user to tell me how to proceed/i,
+    /^\(未检测到\)$/, /^暂无相关记忆$/
+  ]
+  return !rejectPatterns.some(p => p.test(text))
+}
+
 function callAPI(messages) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
@@ -47,7 +61,7 @@ async function consolidate() {
   try { context = fs.readFileSync(injFile, 'utf-8').substring(0, 3000) } catch(e) {}
 
   // Generate episode summary via AI for session continuity
-  if (context) {
+  if (context && isValidContent(context, 50)) {
     try {
       const epPrompt = `Summarize this Claude Code session in 2-3 sentences in Chinese. Focus on: what was accomplished, key decisions made, and what's pending. Be concise.
 
@@ -72,7 +86,7 @@ ${context.substring(0, 2000)}`
   }
 
   // Extract key facts from session (always run, not just when <100 mems)
-  if (context) {
+  if (context && isValidContent(context, 50)) {
     try {
       const prompt = `Extract 3 key reusable facts from this Claude Code session context. Focus on: technical conclusions, project decisions, lessons learned. Output one per line: key: content
 
@@ -83,7 +97,7 @@ ${context.substring(0, 2000)}`
       let extracted = 0
       for (const line of lines) {
         const m = line.match(/^([\w_]+):\s*(.+)/)
-        if (m) {
+        if (m && isValidContent(m[2].trim(), 10)) {
           index.saveSemantic(m[1], m[2].trim())
           index.logEvolution(sessionId, 'extract', { key: m[1] })
           extracted++
@@ -235,7 +249,7 @@ ${context.substring(0, 2000)}`
       const { execSync } = require('child_process')
       const pyCmd = 'import daemon,json; print(json.dumps(daemon.hermes_fusion()))'
       const result = execSync(`python -c "${pyCmd}"`, {
-        cwd: ROOT, timeout: 90000, encoding: 'utf-8'
+        cwd: ROOT, timeout: 90000, encoding: 'utf-8', windowsHide: true
       })
       process.stdout.write(`[overmind] hermes_fusion: ${result.trim()}\n`)
       fs.writeFileSync(HERMES_COUNT_FILE, String(stats.semanticCount))

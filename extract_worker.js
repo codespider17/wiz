@@ -158,7 +158,7 @@ ${getExistingKeys()}
       log(`skill drafts created: ${skillDrafts}`)
       try {
         const { execSync } = require('child_process')
-        execSync(`python -c "import sys; sys.path.insert(0,'${ROOT}'); from daemon import index_skills; print(f'Re-indexed: {len(index_skills())} skills')"`, { timeout: 10000 })
+        execSync(`python -c "import sys; sys.path.insert(0,'${ROOT}'); from daemon import index_skills; print(f'Re-indexed: {len(index_skills())} skills')"`, { timeout: 10000, windowsHide: true })
       } catch(e) {}
     }
 
@@ -166,7 +166,7 @@ ${getExistingKeys()}
     try {
       const injectJS = path.join(ROOT, 'inject.js')
       const { execSync } = require('child_process')
-      execSync(`node "${injectJS}"`, { timeout: 5000 })
+      execSync(`node "${injectJS}"`, { timeout: 5000, windowsHide: true })
     } catch(e) {}
 
     // ---- GRAPH: Extract relationships from conversation ----
@@ -301,7 +301,7 @@ async function main() {
           try { process.kill(oldPid, 'SIGTERM') } catch(e) {}
         } catch(e) {}
         try { fs.unlinkSync(pidFile) } catch(e) {}
-        require('child_process').execSync('sleep 0.05')
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
       } else { log(`pid lock error: ${e.message}`); return }
     }
   }
@@ -347,7 +347,7 @@ async function main() {
         lastConsolidationCheck = Date.now()
         const { spawn } = require('child_process')
         const cp = spawn('node', [path.join(ROOT, 'consolidate.js')], {
-          cwd: ROOT, timeout: 120000, stdio: 'pipe'
+          cwd: ROOT, timeout: 120000, stdio: 'pipe', windowsHide: true
         })
         let out = ''
         cp.stdout.on('data', c => out += c)
