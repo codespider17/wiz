@@ -221,13 +221,24 @@ pip install jieba
 
 ### 4. 设置 API Key
 
-Worker 使用 flash 模型提取记忆，需要 DeepSeek 或兼容 API：
+需要 DeepSeek 或兼容 API。项目使用两个模型：
+
+| 用途 | 模型 | 端点 |
+|------|------|------|
+| Worker 提取 + 注入精选 | `deepseek-v4-flash` | `/v1/chat/completions`（OpenAI 兼容） |
+| 自进化审查 | `deepseek-v4-pro` | `/anthropic/v1/messages`（Anthropic 兼容） |
+
+设置 API Key：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
 ```
 
-也可以在 `lib/api.js` 中修改端点和模型。
+去 [platform.deepseek.com](https://platform.deepseek.com) 注册即可获取。
+
+> **注意**：`deepseek-v4-pro` 和 `deepseek-v4-flash` 是 DeepSeek V4 系列的正式模型名（2026年4月发布）。旧名 `deepseek-chat` / `deepseek-reasoner` 将于 2026年7月24日停用，本项目的模型名不需要因迁移而修改。
+>
+> 如果使用其他兼容 API 提供商，确认其是否支持以上两种端点。部分供应商只支持 OpenAI 兼容端点（`/v1/chat/completions`），此时需将 `lib/api.js` 中的 `callPro` 改用同一端点。
 
 ### 5. 重启 Claude Code
 
