@@ -2,10 +2,27 @@ const path = require('path')
 const fs = require('fs')
 const https = require('https')
 
+function getTranscriptDir() {
+  const home = process.env.HOME || process.env.USERPROFILE
+  const projectsDir = path.join(home, '.claude', 'projects')
+  const projectName = process.cwd()
+    .replace(':', '--')
+    .replace(/[/\\]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '-')
+  const candidate = path.join(projectsDir, projectName)
+  if (fs.existsSync(candidate)) return candidate
+  try {
+    const dirs = fs.readdirSync(projectsDir)
+      .map(d => { try { const full = path.join(projectsDir, d); const files = fs.readdirSync(full).filter(f => f.endsWith('.jsonl')); if (!files.length) return null; const mtime = Math.max(...files.map(f => fs.statSync(path.join(full, f)).mtimeMs)); return { path: full, mtime } } catch(e) { return null } })
+      .filter(Boolean).sort((a, b) => b.mtime - a.mtime)
+    if (dirs.length > 0) return dirs[0].path
+  } catch(e) {}
+  return path.join(projectsDir, 'unknown')
+}
 const ROOT = path.dirname(__filename)
 const { shouldSkipExtraction } = require(path.join(ROOT, 'privacy_filter'))
 const EPISODIC_DIR = path.join(ROOT, 'memory', 'episodic')
-const TRANSCRIPT_DIR = path.join(process.env.HOME || process.env.USERPROFILE, '.claude', 'projects', 'D--claude')
+const TRANSCRIPT_DIR = getTranscriptDir()
 const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || 'YOUR_DEEPSEEK_API_KEY'
 const LOG_FILE = path.join(ROOT, 'worker.log')
 const HERMES_PROMPT = fs.readFileSync(path.join(ROOT, 'HERMES_PROMPT.md'), 'utf-8')
