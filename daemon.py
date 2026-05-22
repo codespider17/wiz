@@ -1,4 +1,4 @@
-"""Context Proxy MCP server — Python implementation"""
+"""Wiz MCP server — Python implementation"""
 import json, sys, os, sqlite3, hashlib, re, time, glob, jieba
 
 ROOT = os.path.dirname(os.path.abspath(__file__))

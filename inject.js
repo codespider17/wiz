@@ -2,6 +2,9 @@ const path = require('path')
 const fs = require('fs')
 const https = require('https')
 
+// --session-start is accepted for hook compatibility; same init path applies
+const IS_SESSION_START = process.argv.includes('--session-start')
+
 const ROOT = path.dirname(__filename)
 const INJECTION_FILE = path.join(ROOT, 'injection.md')
 const LOCK_FILE = path.join(ROOT, '.injection.lock')
