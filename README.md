@@ -1,4 +1,4 @@
-# Wiz V2.1
+# Wiz V2.1.1
 
 <p align="center">
   <b>给 Claude Code 的认知引擎</b><br>
@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="V2.1">
+  <img src="https://img.shields.io/badge/version-2.1.1-blue" alt="V2.1.1">
   <img src="https://img.shields.io/badge/status-stable-green" alt="Stable">
   <img src="https://img.shields.io/badge/license-MIT-purple" alt="MIT">
 </p>
@@ -117,6 +117,18 @@ time_decay = max(0.4, 1.0 − days_since_update × 0.02)
 | 历史会话 | 102 条 |
 | 事件日志 | 233+ 条 |
 | 进化记录 | 115+ 条 |
+
+---
+
+## V2.1.1 修复（2026-05-23）
+
+三个关键修复，彻底解决跨会话记忆一致性问题：
+
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| 跨会话记忆污染 | `inject.js`, `consolidate.js` | consolidate SessionEnd 后直接更新 injection.md 的上次对话节；inject.js 跳过 quick_*.json 噪声文件+验证摘要质量（排除 \|\|\| 分隔符和空摘要）。清理 26 个噪声文件 + 1 个过期 episodic。 |
+| 竞态守卫 + 消息过滤 | `consolidate.js` | readTranscriptContext 系统条目不再计为"真实条目"；isCommandMsg 扩展过滤 `<local-command-caveat/stdout/stderr>`；main() 加 30s TTL 文件锁防止多次 SessionEnd 触发；解析失败行严格计数。 |
+| 最后对话持久化 + cleanEpisodic 修复 | `consolidate.js`, `hook.cs` | SessionEnd 自动将最后对话写入 wiz_last_session.md；修复 cleanEpisodic 两处 bug：30 天合并只匹配 quick_\* 文件（实际是 s\<ts\>_\<id\> 格式），周分区误用 getDate() 而非 ISO 周数。新增 `hook.cs`：带参数化 wizDir 的 C# 启动器，hooks 可直调 launcher.exe 指定脚本。 |
 
 ---
 
@@ -232,12 +244,14 @@ daemon.py (MCP 服务器, 18 个工具)
 ```
 wiz/
 ├─ index.js             记忆数据库管理 (628 行)
-├─ inject.js            上下文注入引擎 (795 行, 信号化任务检测)
-├─ extract_worker.js    后台提取 Worker (371 行, windowsHide 全覆盖)
-├─ consolidate.js       会话结束处理器 (278 行, 内容验证)
+├─ inject.js            上下文注入引擎 (804 行, 信号化任务检测)
+├─ extract_worker.js    后台提取 Worker (374 行, windowsHide 全覆盖)
+├─ consolidate.js       会话结束处理器 (627 行, 竞态守卫+跨会话持久化)
 ├─ start-worker.js      零窗口 Worker 启动器 (36 行, PID 检测)
-├─ launcher.cs          C# 零窗口进程启动器源码
+├─ launcher.cs          C# 零窗口进程启动器源码（原始版）
+├─ hook.cs              C# 参数化零窗口启动器（hooks 直调版）
 ├─ launcher.exe         编译后的 GUI 零窗口启动器
+├─ wiz-launcher.exe     hook.cs 编译的带参数启动器
 ├─ daemon.py            MCP 服务器 (1077 行, 18 个工具)
 ├─ daemon.js            MCP 服务器 (遗留, 130 行)
 ├─ graph.js             知识图谱引擎 (516 行)
