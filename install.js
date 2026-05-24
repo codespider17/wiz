@@ -45,17 +45,17 @@ console.log('[4/5] Configuring MCP server...')
 try {
   const settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'))
   settings.mcpServers = settings.mcpServers || {}
-  settings.mcpServers['context-proxy'] = {
+  settings.mcpServers['wiz'] = {
     type: 'stdio',
-    command: 'node',
-    args: [path.join(ROOT, 'daemon.js')],
+    command: 'python',
+    args: [path.join(ROOT, 'daemon.py')],
     env: {}
   }
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
   console.log('  MCP server added to settings.json')
 } catch(e) {
   console.log(`  settings.json update failed: ${e.message}`)
-  console.log(`  Manually add to settings.json.mcpServers: "context-proxy": { "type": "stdio", "command": "node", "args": ["${path.join(ROOT, 'daemon.js')}"] }`)
+  console.log(`  Manually add to settings.json.mcpServers: "wiz": { "type": "stdio", "command": "python", "args": ["${path.join(ROOT, 'daemon.py').replace(/\\/g, '/')}"] }`)
 }
 
 // 5. Update CLAUDE.md

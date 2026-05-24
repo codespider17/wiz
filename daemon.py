@@ -2,7 +2,7 @@
 import json, sys, os, sqlite3, hashlib, re, time, glob, jieba
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-HOME = os.environ.get('HOME') or os.environ.get('USERPROFILE') or 'C:/Users/Administrator'
+HOME = os.environ.get('HOME') or os.environ.get('USERPROFILE') or ''
 SKILL_DIRS = [
     os.path.join(ROOT, 'skills'),                          # custom skills
     os.path.join(HOME, '.claude', 'skills'),               # CC skills dir
@@ -489,7 +489,7 @@ def index_skills():
                             meta[m.group(1)] = m.group(2).strip()
                     if 'name' in meta:
                         desc = meta.get('description', '')
-                        triggers = re.search(r'TRIGGERS?:' + '\s*(.+)', desc, re.IGNORECASE)
+                        triggers = re.search(r'TRIGGERS?:\s*(.+)', desc, re.IGNORECASE)
                         trigger_str = triggers.group(1) if triggers else ''
                         db.execute('INSERT OR REPLACE INTO skill_index (name, description, triggers, file_path) VALUES (?,?,?,?)', (meta['name'], desc, trigger_str, os.path.join(root, 'SKILL.md')))
                         skills.append({'name': meta['name'], 'description': desc, 'triggers': trigger_str})
@@ -514,7 +514,7 @@ def index_skills():
                             meta[m.group(1)] = m.group(2).strip()
                     if 'name' in meta:
                         desc = meta.get('description', '')
-                        triggers = re.search(r'TRIGGERS?:' + '\s*(.+)', desc, re.IGNORECASE)
+                        triggers = re.search(r'TRIGGERS?:\s*(.+)', desc, re.IGNORECASE)
                         trigger_str = triggers.group(1) if triggers else ''
                         name = meta['name']
                         db.execute('INSERT OR REPLACE INTO skill_index (name, description, triggers, file_path) VALUES (?,?,?,?)', (name, desc, trigger_str, fpath))

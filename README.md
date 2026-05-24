@@ -314,7 +314,6 @@ wiz/
 ├─ launcher.exe         编译后的 GUI 零窗口启动器
 ├─ wiz-launcher.exe     hook.cs 编译的带参数启动器
 ├─ daemon.py            MCP 服务器 (1077 行, 18 个工具)
-├─ daemon.js            MCP 服务器 (遗留, 130 行)
 ├─ graph.js             知识图谱引擎 (516 行)
 ├─ event_log.js         事件日志系统 (169 行, 任务去重)
 ├─ privacy_filter.js    隐私过滤器 (79 行, CJK 感知)
