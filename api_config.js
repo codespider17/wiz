@@ -1,36 +1,54 @@
 /**
  * Wiz API Configuration
  *
- * ccswitch 通过设置环境变量来切换模型，wiz 从环境变量读取配置。
+ * 自动跟随 Claude Code 当前使用的模型。ccswitch 切换模型时，wiz 自动跟着切换。
+ *
+ * 优先级:
+ *   1. WIZ_* 环境变量 (完全覆盖，高级用户)
+ *   2. ANTHROPIC_* 环境变量 (Claude Code / ccswitch 自动设置)
+ *   3. DEEPSEEK_API_KEY (旧版兼容)
+ *   4. 硬编码默认值 (DeepSeek)
  *
  * 环境变量:
- *   WIZ_API_KEY       — API Key (fallback: DEEPSEEK_API_KEY → ANTHROPIC_AUTH_TOKEN)
- *   WIZ_BASE_URL      — API 基础地址 (默认: https://api.deepseek.com)
- *   WIZ_FAST_MODEL    — 快速模型名 (默认: deepseek-v4-flash)
- *   WIZ_STRONG_MODEL  — 强力模型名 (默认: deepseek-v4-pro[1m])
- *   WIZ_API_STYLE     — API 风格: "openai" | "anthropic" (默认: 自动检测)
+ *   WIZ_API_KEY       — API Key (覆盖)
+ *   WIZ_BASE_URL      — API 基础地址 (覆盖)
+ *   WIZ_FAST_MODEL    — 快速模型名 (覆盖)
+ *   WIZ_STRONG_MODEL  — 强力模型名 (覆盖)
+ *   WIZ_API_STYLE     — API 风格: "openai" | "anthropic" (覆盖，默认自动检测)
  *
- * 自动检测规则:
- *   - base_url 包含 deepseek.com → 强力模型用 anthropic 风格，快速模型用 openai 风格
- *   - 其他情况 → 统一用 openai 风格 (兼容 OpenAI / Azure / 本地模型 / 其他)
+ * 自动读取 (Claude Code / ccswitch 设置):
+ *   ANTHROPIC_AUTH_TOKEN — API Key
+ *   ANTHROPIC_BASE_URL   — API 基础地址
+ *   ANTHROPIC_MODEL      — 模型名 (fast 和 strong 共用)
  */
 
 const https = require('https')
 const http = require('http')
 const { URL } = require('url')
 
-// ---- 配置读取 ----
+// ---- 配置读取 (优先级: WIZ_* → ANTHROPIC_* → DEEPSEEK_* → 默认值) ----
 
 const API_KEY = process.env.WIZ_API_KEY
-  || process.env.DEEPSEEK_API_KEY
   || process.env.ANTHROPIC_AUTH_TOKEN
+  || process.env.DEEPSEEK_API_KEY
   || ''
 
-const BASE_URL = (process.env.WIZ_BASE_URL || 'https://api.deepseek.com').replace(/\/+$/, '')
+const BASE_URL = (
+  process.env.WIZ_BASE_URL
+  || process.env.ANTHROPIC_BASE_URL
+  || 'https://api.deepseek.com'
+).replace(/\/+$/, '')
 
-const FAST_MODEL = process.env.WIZ_FAST_MODEL || 'deepseek-v4-flash'
-const STRONG_MODEL = process.env.WIZ_STRONG_MODEL || 'deepseek-v4-pro[1m]'
-const API_STYLE = process.env.WIZ_API_STYLE || '' // 'openai' | 'anthropic' | '' (auto)
+// 模型名: WIZ_* 优先，否则用 ANTHROPIC_MODEL（Claude Code 当前模型），最后 fallback 到 DeepSeek
+const FAST_MODEL = process.env.WIZ_FAST_MODEL
+  || process.env.ANTHROPIC_MODEL
+  || 'deepseek-v4-flash'
+
+const STRONG_MODEL = process.env.WIZ_STRONG_MODEL
+  || process.env.ANTHROPIC_MODEL
+  || 'deepseek-v4-pro[1m]'
+
+const API_STYLE = process.env.WIZ_API_STYLE || ''
 
 // ---- 自动检测 API 风格 ----
 
@@ -40,7 +58,9 @@ function detectStyle(isStrong) {
   if (BASE_URL.includes('deepseek.com')) {
     return isStrong ? 'anthropic' : 'openai'
   }
-  // 其他: 统一 openai 兼容
+  // ANTHROPIC_BASE_URL 路径中包含 anthropic → anthropic 风格
+  if (BASE_URL.includes('anthropic')) return 'anthropic'
+  // 其他 → openai 兼容 (OpenAI / OpenRouter / 本地模型等)
   return 'openai'
 }
 
@@ -142,27 +162,18 @@ function callAnthropic(messages, model, maxTokens = 4096, timeout = 120000) {
 
 // ---- 统一调用接口 ----
 
-/**
- * 调用强力模型 (用于自进化审查、复杂推理)
- */
 function callStrong(messages, maxTokens = 16384) {
   const style = detectStyle(true)
   const caller = style === 'anthropic' ? callAnthropic : callOpenAI
   return caller(messages, STRONG_MODEL, maxTokens)
 }
 
-/**
- * 调用快速模型 (用于记忆提取、技能推荐、任务分解)
- */
 function callFast(messages, maxTokens = 4096) {
   const style = detectStyle(false)
   const caller = style === 'anthropic' ? callAnthropic : callOpenAI
   return caller(messages, FAST_MODEL, maxTokens)
 }
 
-/**
- * 调用快速模型 (单条 prompt，便捷接口)
- */
 function callFastPrompt(prompt, maxTokens = 4096) {
   return callFast([{ role: 'user', content: prompt }], maxTokens)
 }
@@ -176,6 +187,10 @@ function getConfig() {
     strongModel: STRONG_MODEL,
     apiStyle: API_STYLE || 'auto',
     hasKey: !!API_KEY,
+    source: process.env.WIZ_API_KEY ? 'WIZ_API_KEY'
+      : process.env.ANTHROPIC_AUTH_TOKEN ? 'ANTHROPIC_AUTH_TOKEN (Claude Code)'
+      : process.env.DEEPSEEK_API_KEY ? 'DEEPSEEK_API_KEY'
+      : 'none',
     detectedStrongStyle: detectStyle(true),
     detectedFastStyle: detectStyle(false)
   }

@@ -11,21 +11,29 @@ SKILL_DIRS = [
 DB_PATH = os.path.join(ROOT, 'memory.db')
 GRAPH_DB_PATH = os.path.join(ROOT, 'graph.db')
 
-# ---- API Configuration (ccswitch compatible) ----
+# ---- API Configuration (ccswitch compatible, auto-follow Claude Code) ----
 API_KEY = (os.environ.get('WIZ_API_KEY')
-    or os.environ.get('DEEPSEEK_API_KEY')
     or os.environ.get('ANTHROPIC_AUTH_TOKEN')
+    or os.environ.get('DEEPSEEK_API_KEY')
     or '')
-BASE_URL = (os.environ.get('WIZ_BASE_URL') or 'https://api.deepseek.com').rstrip('/')
-FAST_MODEL = os.environ.get('WIZ_FAST_MODEL') or 'deepseek-v4-flash'
-STRONG_MODEL = os.environ.get('WIZ_STRONG_MODEL') or 'deepseek-v4-pro[1m]'
-_API_STYLE = os.environ.get('WIZ_API_STYLE') or ''  # 'openai' | 'anthropic' | '' (auto)
+BASE_URL = (os.environ.get('WIZ_BASE_URL')
+    or os.environ.get('ANTHROPIC_BASE_URL')
+    or 'https://api.deepseek.com').rstrip('/')
+FAST_MODEL = (os.environ.get('WIZ_FAST_MODEL')
+    or os.environ.get('ANTHROPIC_MODEL')
+    or 'deepseek-v4-flash')
+STRONG_MODEL = (os.environ.get('WIZ_STRONG_MODEL')
+    or os.environ.get('ANTHROPIC_MODEL')
+    or 'deepseek-v4-pro[1m]')
+_API_STYLE = os.environ.get('WIZ_API_STYLE') or ''
 
 def _detect_style(is_strong):
     if _API_STYLE:
         return _API_STYLE
     if 'deepseek.com' in BASE_URL:
         return 'anthropic' if is_strong else 'openai'
+    if 'anthropic' in BASE_URL:
+        return 'anthropic'
     return 'openai'
 
 RELATION_TYPES = [
