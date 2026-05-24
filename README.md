@@ -418,34 +418,67 @@ csc /target:winexe launcher.cs /out:launcher.exe
 
 ### 5. 设置 API Key
 
-需要 DeepSeek 或兼容 API。项目使用两个模型：
+Wiz 支持任何 OpenAI / Anthropic 兼容 API。默认配置为 DeepSeek。
 
-| 用途 | 模型 | 端点 |
-|------|------|------|
-| Worker 提取 + 注入精选 | `deepseek-v4-flash` | `/v1/chat/completions`（OpenAI 兼容） |
-| 自进化审查 | `deepseek-v4-pro` | `/anthropic/v1/messages`（Anthropic 兼容） |
+**环境变量**：
 
-去 [platform.deepseek.com](https://platform.deepseek.com) 注册获取 API Key。
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `WIZ_API_KEY` | API Key（优先级最高） | — |
+| `WIZ_BASE_URL` | API 基础地址 | `https://api.deepseek.com` |
+| `WIZ_FAST_MODEL` | 快速模型（记忆提取、技能推荐） | `deepseek-v4-flash` |
+| `WIZ_STRONG_MODEL` | 强力模型（自进化审查、复杂推理） | `deepseek-v4-pro[1m]` |
+| `WIZ_API_STYLE` | API 风格：`openai` / `anthropic`（空=自动检测） | 自动 |
+
+> 兼容旧变量名：`DEEPSEEK_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN` 仍可用作 fallback。
 
 **Windows（推荐）**：
 
 ```cmd
-:: 永久设置环境变量（新开终端生效）
-setx DEEPSEEK_API_KEY sk-xxx
+:: DeepSeek（默认）
+setx WIZ_API_KEY sk-xxx
 
-:: 当前终端立即生效
-set DEEPSEEK_API_KEY=sk-xxx
+:: 或切换到其他 OpenAI 兼容 API（如 OpenRouter、本地模型等）
+setx WIZ_API_KEY your-key
+setx WIZ_BASE_URL https://openrouter.ai/api
+setx WIZ_FAST_MODEL openai/gpt-4o-mini
+setx WIZ_STRONG_MODEL openai/gpt-4o
 ```
 
 **Linux / macOS**：
 
 ```bash
-# 写入 shell 配置文件（永久）
-echo 'export DEEPSEEK_API_KEY=sk-xxx' >> ~/.bashrc
+# DeepSeek（默认）
+echo 'export WIZ_API_KEY=sk-xxx' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-> **验证**：新开一个终端，运行 `echo %DEEPSEEK_API_KEY%`（Windows）或 `echo $DEEPSEEK_API_KEY`（Linux/Mac），确认能看到你的 key。
+**常用 API 配置示例**：
+
+```bash
+# DeepSeek（默认，无需额外配置）
+setx WIZ_API_KEY sk-xxx
+
+# OpenAI
+setx WIZ_API_KEY sk-xxx
+setx WIZ_BASE_URL https://api.openai.com
+setx WIZ_FAST_MODEL gpt-4o-mini
+setx WIZ_STRONG_MODEL gpt-4o
+
+# OpenRouter（聚合多模型）
+setx WIZ_API_KEY sk-or-xxx
+setx WIZ_BASE_URL https://openrouter.ai/api
+setx WIZ_FAST_MODEL openai/gpt-4o-mini
+setx WIZ_STRONG_MODEL anthropic/claude-sonnet-4-20250514
+
+# 本地模型（Ollama / LM Studio）
+setx WIZ_API_KEY ollama
+setx WIZ_BASE_URL http://localhost:11434
+setx WIZ_FAST_MODEL qwen2.5:7b
+setx WIZ_STRONG_MODEL qwen2.5:32b
+```
+
+> **验证**：新开终端，运行 `node -e "console.log(require('./api_config').getConfig())"` 查看当前配置。
 
 ### 6. 配置 MCP 服务器（可选）
 
@@ -637,7 +670,7 @@ node -e "const i = require('./index'); i.init(); console.log(i.searchTiered('关
 V3 的智能淘汰 + 存储管理双重保障：tier 自动降级淘汰 + 50MB/100MB 存储阈值自动清理。
 
 **支持其他 API 吗？**
-支持任何 OpenAI 兼容 API。修改 `inject.js` 和 `consolidate.js` 中的 `DEEPSEEK_BASE_URL` 和模型名即可。
+支持。设置 `WIZ_BASE_URL`、`WIZ_FAST_MODEL`、`WIZ_STRONG_MODEL` 环境变量即可，无需改代码。详见"设置 API Key"章节。
 
 **launcher.exe 弹出窗口？**
 确保编译时使用 `/target:winexe`（不是 `/target:exe`）。如果不想编译，可直接用 `node inject.js`（会有短暂 cmd 闪过）。

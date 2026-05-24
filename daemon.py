@@ -11,6 +11,23 @@ SKILL_DIRS = [
 DB_PATH = os.path.join(ROOT, 'memory.db')
 GRAPH_DB_PATH = os.path.join(ROOT, 'graph.db')
 
+# ---- API Configuration (ccswitch compatible) ----
+API_KEY = (os.environ.get('WIZ_API_KEY')
+    or os.environ.get('DEEPSEEK_API_KEY')
+    or os.environ.get('ANTHROPIC_AUTH_TOKEN')
+    or '')
+BASE_URL = (os.environ.get('WIZ_BASE_URL') or 'https://api.deepseek.com').rstrip('/')
+FAST_MODEL = os.environ.get('WIZ_FAST_MODEL') or 'deepseek-v4-flash'
+STRONG_MODEL = os.environ.get('WIZ_STRONG_MODEL') or 'deepseek-v4-pro[1m]'
+_API_STYLE = os.environ.get('WIZ_API_STYLE') or ''  # 'openai' | 'anthropic' | '' (auto)
+
+def _detect_style(is_strong):
+    if _API_STYLE:
+        return _API_STYLE
+    if 'deepseek.com' in BASE_URL:
+        return 'anthropic' if is_strong else 'openai'
+    return 'openai'
+
 RELATION_TYPES = [
     'depends_on', 'part_of', 'blocked_by', 'causes', 'solves',
     'related_to', 'extends', 'conflicts_with', 'alternative_to', 'triggers'
@@ -347,17 +364,26 @@ def search_hybrid(query, limit=10):
 
 def call_ai_api(messages, max_tokens=16384, timeout=120):
     import urllib.request
-    API_KEY = os.environ.get('DEEPSEEK_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN') or 'YOUR_DEEPSEEK_API_KEY'
-    body = json.dumps({
-        'model': 'deepseek-v4-flash',
-        'max_tokens': max_tokens,
-        'messages': messages
-    }).encode('utf-8')
-    req = urllib.request.Request('https://api.deepseek.com/v1/chat/completions',
-        data=body,
-        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {API_KEY}'})
+    style = _detect_style(False)
+    if style == 'anthropic':
+        body = json.dumps({
+            'model': FAST_MODEL, 'max_tokens': max_tokens, 'messages': messages
+        }).encode('utf-8')
+        req = urllib.request.Request(f'{BASE_URL}/v1/messages',
+            data=body,
+            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'})
+    else:
+        body = json.dumps({
+            'model': FAST_MODEL, 'max_tokens': max_tokens, 'messages': messages
+        }).encode('utf-8')
+        req = urllib.request.Request(f'{BASE_URL}/v1/chat/completions',
+            data=body,
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {API_KEY}'})
     resp = urllib.request.urlopen(req, timeout=timeout)
     data = json.loads(resp.read())
+    if style == 'anthropic':
+        text_block = next((c for c in data.get('content', []) if c.get('type') == 'text'), None)
+        return text_block['text'] if text_block else data.get('content', [{}])[0].get('text', '')
     return data['choices'][0]['message']['content']
 
 def select_memories_ai(query, all_mems, limit=5):
@@ -685,10 +711,33 @@ def auto_promote():
     db.commit()
     return events
 
+def call_strong_api(messages, max_tokens=16384, timeout=300):
+    """Call the strong model (for complex reasoning, evolution, etc.)"""
+    import urllib.request
+    style = _detect_style(True)
+    if style == 'anthropic':
+        body = json.dumps({
+            'model': STRONG_MODEL, 'max_tokens': max_tokens, 'messages': messages
+        }).encode('utf-8')
+        req = urllib.request.Request(f'{BASE_URL}/v1/messages',
+            data=body,
+            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'})
+    else:
+        body = json.dumps({
+            'model': STRONG_MODEL, 'max_tokens': max_tokens, 'messages': messages
+        }).encode('utf-8')
+        req = urllib.request.Request(f'{BASE_URL}/v1/chat/completions',
+            data=body,
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {API_KEY}'})
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    data = json.loads(resp.read())
+    if style == 'anthropic':
+        text_block = next((c for c in data.get('content', []) if c.get('type') == 'text'), None)
+        return text_block.get('text', '') if text_block else ''
+    return data['choices'][0]['message']['content']
+
 def analyze_skills_with_pro():
     """Offline: pro reads all SKILL.md files, generates matching_tags for each"""
-    import urllib.request
-    API_KEY = os.environ.get('DEEPSEEK_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN') or 'YOUR_DEEPSEEK_API_KEY'
 
     # Add matching_tags column if needed
     try: db.execute('ALTER TABLE skill_index ADD COLUMN matching_tags TEXT DEFAULT \"\"')
@@ -720,18 +769,7 @@ Skills:
 {catalog}"""
 
     try:
-        body = json.dumps({
-            'model': 'deepseek-v4-pro[1m]',
-            'max_tokens': 16384,
-            'messages': [{'role': 'user', 'content': prompt}]
-        }).encode('utf-8')
-        req = urllib.request.Request('https://api.deepseek.com/anthropic/v1/messages',
-            data=body,
-            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'})
-        resp = urllib.request.urlopen(req, timeout=300)
-        data = json.loads(resp.read())
-        text_block = next((c for c in data.get('content', []) if c.get('type') == 'text'), None)
-        result = text_block.get('text', '') if text_block else ''
+        result = call_strong_api([{'role': 'user', 'content': prompt}])
     except Exception as e:
         db.execute("INSERT INTO evolution_log (session_id, action, detail) VALUES ('hermes', 'analyze_skills_error', ?)", (str(e)[:500],))
         db.commit()
@@ -756,8 +794,6 @@ Skills:
 
 def evolve_with_ai():
     """AI-driven evolution: merge similar, detect contradictions, create structured workflows"""
-    import urllib.request
-    API_KEY = os.environ.get('DEEPSEEK_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN') or 'YOUR_DEEPSEEK_API_KEY'
 
     # Get top 30 high-value memories for AI analysis
     rows = db.execute("""SELECT key, content, tags, COALESCE(confidence,0.5) as conf, access_count
@@ -782,18 +818,7 @@ def evolve_with_ai():
 {catalog}"""
 
     try:
-        body = json.dumps({
-            'model': 'deepseek-v4-pro[1m]',
-            'max_tokens': 16384,
-            'messages': [{'role': 'user', 'content': prompt}]
-        }).encode('utf-8')
-        req = urllib.request.Request('https://api.deepseek.com/anthropic/v1/messages',
-            data=body,
-            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'})
-        resp = urllib.request.urlopen(req, timeout=300)
-        data = json.loads(resp.read())
-        text_block = next((c for c in data.get('content', []) if c.get('type') == 'text'), None)
-        result = text_block.get('text', '') if text_block else ''
+        result = call_strong_api([{'role': 'user', 'content': prompt}])
     except Exception as e:
         db.execute("INSERT INTO evolution_log (session_id, action, detail) VALUES ('hermes', 'ai_evolve_error', ?)", (str(e)[:500],))
         db.commit()

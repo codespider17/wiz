@@ -1,9 +1,8 @@
 const fs = require('fs')
 const path = require('path')
-const https = require('https')
 
 const ROOT = path.dirname(__filename)
-const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || 'YOUR_DEEPSEEK_API_KEY'
+const api = require('./api_config')
 
 // Content validation: skip system error messages and non-project content
 function isValidContent(text, minLen = 20) {
@@ -20,31 +19,7 @@ function isValidContent(text, minLen = 20) {
 }
 
 function callAPI(messages) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      model: 'deepseek-v4-pro[1m]',
-      max_tokens: 1024,
-      messages: messages.map(m => ({ role: m.role, content: m.content }))
-    })
-    const req = https.request({
-      hostname: 'api.deepseek.com', path: '/anthropic/v1/messages', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' }
-    }, res => {
-      let data = ''
-      res.on('data', c => data += c)
-      res.on('end', () => {
-        try {
-          const body = JSON.parse(data)
-          if (body.error) { reject(new Error(body.error.message)); return }
-          const textBlock = body.content?.find(c => c.type === 'text')
-          resolve(textBlock ? textBlock.text : (body.content?.[0]?.text || ''))
-        } catch(e) { reject(e) }
-      })
-    })
-    req.on('error', reject)
-    req.write(body)
-    req.end()
-  })
+  return api.callStrong(messages, 1024)
 }
 
 // ---- Read transcript context (no DB needed, runs even if index module fails) ----
