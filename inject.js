@@ -50,128 +50,112 @@ const api = require('./api_config')
 
 if (!fs.existsSync(EPISODIC_DIR)) fs.mkdirSync(EPISODIC_DIR, { recursive: true })
 
-// AI-driven skill selection — keyword pre-filter → AI picks best
-async function selectSkillsAI(userTask, projCtx, allSkills) {
+// AI-driven combined skill + memory selection — 1 API call instead of 2
+async function selectSkillsAndMemsAI(userTask, projCtx, allSkills, allMems, limit = 5) {
   try {
-    if (!allSkills || allSkills.length === 0) return null
-
     const index_ = require(path.join(ROOT, 'index'))
 
-    // Stage 1: Keyword pre-filter — same as selectMemoriesAI pattern
+    // Pre-filter skills
     const query = userTask || projCtx || ''
     const keywordScored = index_.searchSkills(query, 20)
-    const candidates = keywordScored.length >= 3 ? keywordScored : allSkills.slice(0, 20)
+    const candidates = keywordScored.length >= 3 ? keywordScored : (allSkills || []).slice(0, 20)
 
-    // Stage 2: Full content for top candidates, AI picks
-    const parts = []
-    for (const s of candidates) {
-      try {
-        let content = fs.readFileSync(s.file_path, 'utf-8')
-        const m = content.match(/^---[\s\S]*?---\n([\s\S]+)/)
-        if (m) content = m[1].trim()
-        parts.push(`### ${s.name}\n${content.substring(0, 600)}`)
-      } catch(e) {
-        parts.push(`### ${s.name}\n${(s.description || '').substring(0, 200)}`)
-      }
-    }
+    if (candidates.length === 0 && (!allMems || allMems.length === 0)) return { skills: [], mems: [] }
 
     const skillPrefsText = index_.formatSkillPrefsForAI()
-    const catalogText = parts.join('\n\n')
-    const prompt = `${skillPrefsText ? skillPrefsText + '\n\n' : ''}Pick 0-5 skills from the catalog that best match this task.
+    const skillCatalog = candidates.map(s => {
+      const core = getSkillCore(s)
+      return `- ${s.name}: ${core || (s.description || '').substring(0, 80)}`
+    }).join('\n')
 
-- Return 0 skills ONLY for very short daily greetings. For ANY technical task, code change, debugging, project planning, or tool usage, you MUST pick at least 1 matching skill.
-- Return ONLY a JSON array: ["skill-a","skill-b"] or []
-
-Task: ${(userTask || '').substring(0, 300)}
-
-${catalogText}`
-
-    const logFile_ = path.join(ROOT, 'inject.log')
-    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAI: calling flash API (${catalogText.length} chars, ${candidates.length} skills)\n`)
-    const result = await api.callFastPrompt(prompt)
-    if (!result) {
-      fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAI: API returned empty\n`)
-      return null
-    }
-
-    let names = []
-    try { names = JSON.parse(result.trim()) } catch(e) {
-      const m = result.match(/\[.*\]/s)
-      if (m) try { names = JSON.parse(m[0]) } catch(e2) {}
-    }
-    if (!Array.isArray(names)) return null
-
-    const skills = []
-    for (const name of names) {
-      const s = allSkills.find(r => r.name === name)
-      if (s) skills.push(s)
-    }
-    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAI: picked [${skills.map(s=>s.name).join(',')}]\n`)
-    return skills.slice(0, 5)
-  } catch(e) {
-    const logFile_ = path.join(ROOT, 'inject.log')
-    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAI ERROR: ${e.message}\n`)
-    return null
-  }
-}
-
-// AI-driven memory selection — pre-filter top candidates, then AI picks best
-async function selectMemoriesAI(userTask, allMems, limit = 5) {
-  try {
-    if (!allMems || allMems.length === 0) return null
-    // Pre-filter: sliding window keywords for mixed CJK+English without spaces
+    // Pre-filter memories (keyword scoring)
     const raw = (userTask || '').toLowerCase()
     const keywords = []
     for (let i = 0; i < raw.length - 1; i++) {
       const ch = raw.substring(i, i + 2)
       if (/[a-z0-9一-鿿]{2}/.test(ch)) keywords.push(ch)
     }
-    // Also add longer English-only words
     const engWords = raw.match(/[a-z0-9]{3,}/g) || []
     for (const w of engWords) keywords.push(w)
     const hasCJK = /[一-鿿]/.test(userTask || '')
-    const scored = allMems.map(m => {
+    const scored = (allMems || []).map(m => {
       const keyLow = (m.key || '').toLowerCase()
       const contentLow = (m.content || '').toLowerCase()
-      const txt = keyLow + ' ' + contentLow
       let s = 0
       for (const k of keywords) {
-        if (keyLow.includes(k)) s += 2 // key match is strong signal
+        if (keyLow.includes(k)) s += 2
         else if (contentLow.includes(k)) s += 1
       }
-      // CJK queries: boost content-only matches (Chinese→English cross-lingual)
       if (hasCJK && contentLow.length > 20) s += 0.5
-      // Feedback boost: proven-effective memories get higher score
       const eff = (m.effectiveness_score || 0.5)
       const inj = (m.injected_count || 0)
       const effBoost = eff * 1.5 + (inj > 0 ? 0.1 : 0)
-      // Tier boost: hot tier memories get priority
       const tierBoost = (m.tier === 'hot') ? 0.3 : (m.tier === 'frozen') ? 0.4 : 0
       return Object.assign({}, m, {kscore: s + effBoost + tierBoost})
     })
     scored.sort((a, b) => b.kscore - a.kscore)
-    const shortlist = scored.slice(0, 40)
-    if (shortlist.length === 0) return null
+    const shortlist = scored.slice(0, 30)
+    const memCatalog = shortlist.map(m => `- ${m.key}: ${(m.content || '').substring(0, 60)}`).join('\n')
 
-    const catalog = shortlist.map(m => `- ${m.key}: ${(m.content || '').substring(0, 60)}`).join('\n')
-    const prompt = `Pick the ${limit} BEST memories for this task. Prefer specific technical facts. Skip plugin-internal noise. You MUST pick at least 2. Return ONLY JSON array: ["key1","key2","key3"]
+    const prompt = `You are a context selector for an AI coding assistant. Pick the best skills and memories for this task.
 
-Task: ${(userTask || '').substring(0, 300)}
+## TASK
+${(userTask || '').substring(0, 300)}
 
-${catalog}`
+${skillPrefsText ? '## SKILL PREFERENCES\n' + skillPrefsText + '\n' : ''}
+## AVAILABLE SKILLS (pick 0-5)
+${skillCatalog || '(none)'}
 
+## AVAILABLE MEMORIES (pick 2-5)
+${memCatalog || '(none)'}
+
+## RULES
+- Skills: Return 0 ONLY for short greetings. For ANY technical task, pick at least 1.
+- Memories: Prefer specific technical facts. Pick at least 2.
+- Return ONLY valid JSON: {"skills":["skill-a"],"memories":["key1","key2"]}`
+
+    const logFile_ = path.join(ROOT, 'inject.log')
+    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAndMemsAI: calling flash API (${prompt.length} chars, ${candidates.length} skills, ${shortlist.length} mems)\n`)
     const result = await api.callFastPrompt(prompt)
-    if (!result) return null
-
-    let names = []
-    try { names = JSON.parse(result.trim()) } catch(e) {
-      const m = result.match(/\[.*\]/s)
-      if (m) try { names = JSON.parse(m[0]) } catch(e2) {}
+    if (!result) {
+      fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAndMemsAI: API returned empty\n`)
+      return { skills: null, mems: null }
     }
-    if (!Array.isArray(names)) return null
 
-    return names.map(n => allMems.find(m => m.key === n)).filter(Boolean).slice(0, limit)
-  } catch(e) { return null }
+    // Parse combined JSON response
+    let parsed = null
+    try { parsed = JSON.parse(result.trim()) } catch(e) {
+      const m = result.match(/\{[\s\S]*\}/)
+      if (m) try { parsed = JSON.parse(m[0]) } catch(e2) {}
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAndMemsAI: parse failed, raw=${result.substring(0,100)}\n`)
+      return { skills: null, mems: null }
+    }
+
+    // Extract skills
+    let skills = []
+    if (Array.isArray(parsed.skills)) {
+      for (const name of parsed.skills) {
+        const s = allSkills.find(r => r.name === name)
+        if (s) skills.push(s)
+      }
+    }
+
+    // Extract memories
+    let mems = []
+    if (Array.isArray(parsed.memories)) {
+      mems = parsed.memories.map(n => allMems.find(m => m.key === n)).filter(Boolean).slice(0, limit)
+    }
+
+    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAndMemsAI: picked ${skills.length} skills [${skills.map(s=>s.name).join(',')}], ${mems.length} mems [${mems.map(m=>m.key).join(',')}]\n`)
+    return { skills: skills.slice(0, 5), mems }
+  } catch(e) {
+    const logFile_ = path.join(ROOT, 'inject.log')
+    fs.appendFileSync(logFile_, `${new Date().toISOString()} selectSkillsAndMemsAI ERROR: ${e.message}\n`)
+    return { skills: null, mems: null }
+  }
 }
 
 // Task decomposition — vague command + memories/issues → concrete plan
@@ -682,49 +666,27 @@ async function main() {
   writeInjection(liteDoc)
   fs.appendFileSync(logFile, `${new Date().toISOString()} inject(lite): ${liteDoc.length} chars mem=${stats.semanticCount} worker=${workerSpawned ? 'spawned' : 'already_running'}\n`)
 
-  // Phase 2: Run AI skill + memory + decomposition in PARALLEL
+  // Phase 2: Combined skill + memory selection (1 API call instead of 2)
   const allSkills = index.getAllSkills()
   let skills = [], skillMethod = 'none', aiSaidEmpty = false
   let mems = liteMems, memMethod = 'keyword'
   let taskPlan = null
 
-  // Phase 2: Run AI skill + memory + decomposition in PARALLEL
-
-  const [aiSkillsResult, aiMemsResult, aiDecompResult] = await Promise.allSettled([
-    Promise.race([
-      selectSkillsAI(userTask, projCtx, allSkills),
-      new Promise(r => setTimeout(() => r('timeout'), 60000))
-    ]),
-    Promise.race([
-      selectMemoriesAI(userTask, allMemKeys, 5),
-      new Promise(r => setTimeout(() => r('timeout'), 60000))
-    ]),
-    Promise.race([
-      decomposeTask(userTask, allMemKeys, issueMems),
-      new Promise(r => setTimeout(() => r('timeout'), 60000))
-    ])
+  const aiResult = await Promise.race([
+    selectSkillsAndMemsAI(userTask, projCtx, allSkills, allMemKeys, 5),
+    new Promise(r => setTimeout(() => r({ skills: null, mems: null }), 60000))
   ])
 
-  // Process skill results
-  const aiResult = aiSkillsResult.value
-  if (aiResult !== 'timeout' && Array.isArray(aiResult)) {
-    if (aiResult.length > 0) { skills = aiResult; skillMethod = 'ai' }
+  // Process combined results
+  if (aiResult.skills !== null && Array.isArray(aiResult.skills)) {
+    if (aiResult.skills.length > 0) { skills = aiResult.skills; skillMethod = 'ai' }
     else { aiSaidEmpty = true; skillMethod = 'ai' }
   }
-  // Process memory results
-  const aiMems = aiMemsResult.value
-  if (aiMems === 'timeout') {
-    fs.appendFileSync(logFile, `${new Date().toISOString()} selectMemoriesAI: timeout\n`)
-  } else if (Array.isArray(aiMems)) {
-    if (aiMems.length > 0) {
-      mems = aiMems
+  if (aiResult.mems !== null && Array.isArray(aiResult.mems)) {
+    if (aiResult.mems.length > 0) {
+      mems = aiResult.mems
       memMethod = 'ai'
-      fs.appendFileSync(logFile, `${new Date().toISOString()} selectMemoriesAI: picked [${aiMems.map(m=>m.key).join(',')}]\n`)
-    } else {
-      fs.appendFileSync(logFile, `${new Date().toISOString()} selectMemoriesAI: returned empty []\n`)
     }
-  } else {
-    fs.appendFileSync(logFile, `${new Date().toISOString()} selectMemoriesAI: unexpected result ${typeof aiMems}: ${JSON.stringify(aiMems).substring(0,100)}\n`)
   }
 
   // Only keyword fallback if API failed — not when AI said "no skills needed"
@@ -739,11 +701,16 @@ async function main() {
     skillMethod = 'keyword'
   }
 
-  // Process decomposition result
-  const decompVal = aiDecompResult.value
-  if (typeof decompVal === 'string' && decompVal.length > 10) {
-    taskPlan = decompVal
-    fs.appendFileSync(logFile, `${new Date().toISOString()} decomposeTask: plan generated (${decompVal.length} chars)\n`)
+  // Decomposition: only for vague/short tasks (conditional, saves API calls)
+  if (userTask && userTask.trim().length <= 50) {
+    const decompVal = await Promise.race([
+      decomposeTask(userTask, allMemKeys, issueMems),
+      new Promise(r => setTimeout(() => r(null), 30000))
+    ])
+    if (typeof decompVal === 'string' && decompVal.length > 10) {
+      taskPlan = decompVal
+      fs.appendFileSync(logFile, `${new Date().toISOString()} decomposeTask: plan generated (${decompVal.length} chars)\n`)
+    }
   }
 
   // Also keyword memory fallback if AI returned nothing

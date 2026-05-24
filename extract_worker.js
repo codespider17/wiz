@@ -1,6 +1,5 @@
 const path = require('path')
 const fs = require('fs')
-const https = require('https')
 
 function getTranscriptDir() {
   const home = process.env.HOME || process.env.USERPROFILE
@@ -23,7 +22,7 @@ const ROOT = path.dirname(__filename)
 const { shouldSkipExtraction } = require(path.join(ROOT, 'privacy_filter'))
 const EPISODIC_DIR = path.join(ROOT, 'memory', 'episodic')
 const TRANSCRIPT_DIR = getTranscriptDir()
-const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || 'YOUR_DEEPSEEK_API_KEY'
+const api = require(path.join(ROOT, 'api_config'))
 const LOG_FILE = path.join(ROOT, 'worker.log')
 const HERMES_PROMPT = fs.readFileSync(path.join(ROOT, 'HERMES_PROMPT.md'), 'utf-8')
 const POLL_INTERVAL = 30000
@@ -34,32 +33,6 @@ if (!fs.existsSync(EPISODIC_DIR)) fs.mkdirSync(EPISODIC_DIR, { recursive: true }
 
 function log(msg) {
   fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} [worker] ${msg}\n`)
-}
-
-function callDeepSeek(messages) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      model: 'deepseek-v4-flash',
-      messages: messages,
-      max_tokens: 16384,
-      temperature: 0.1
-    })
-    const req = https.request({
-      hostname: 'api.deepseek.com', path: '/v1/chat/completions', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
-      timeout: 300000
-    }, res => {
-      let data = ''
-      res.on('data', c => data += c)
-      res.on('end', () => {
-        try { resolve(JSON.parse(data).choices[0].message.content) }
-        catch(e) { reject(e) }
-      })
-    })
-    req.on('error', reject)
-    req.write(body)
-    req.end()
-  })
 }
 
 function findCurrentTranscript() {
@@ -120,7 +93,7 @@ ${getExistingKeys()}
 请按格式输出每条新发现的事实。`
 
   try {
-    const result = await callDeepSeek([{ role: 'system', content: HERMES_PROMPT }, { role: 'user', content: prompt }])
+    const result = await api.callFast([{ role: 'system', content: HERMES_PROMPT }, { role: 'user', content: prompt }])
     if (!result) return 0
 
     const index = require(path.join(ROOT, 'index'))
@@ -178,7 +151,7 @@ ${getExistingKeys()}
       const allMems = index.getAllMemoryKeys()
       if (allMems.length >= 5) {
         const relPrompt = graph.buildExtractionPrompt(allMems, text)
-        const relResult = await callDeepSeek([{ role: 'user', content: relPrompt }])
+        const relResult = await api.callFast([{ role: 'user', content: relPrompt }])
         if (relResult) {
           const relations = graph.parseExtractionResult(relResult)
           if (relations.length > 0) {
@@ -210,7 +183,7 @@ Rules:
 Conversation:
 ${text.substring(0, 4000)}`
 
-      const prefResult = await callDeepSeek([{ role: 'user', content: skillPrefPrompt }])
+      const prefResult = await api.callFast([{ role: 'user', content: skillPrefPrompt }])
       if (prefResult) {
         const prefLines = prefResult.split('\n').filter(l => l.startsWith('SKILL_PREF:'))
         for (const line of prefLines) {
