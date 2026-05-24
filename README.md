@@ -418,67 +418,35 @@ csc /target:winexe launcher.cs /out:launcher.exe
 
 ### 5. 设置 API Key
 
-Wiz 支持任何 OpenAI / Anthropic 兼容 API。默认配置为 DeepSeek。
+**零配置模式**：Wiz 自动跟随 Claude Code 当前使用的模型。通过 ccswitch 切换模型时，wiz 自动跟着切换，无需额外设置。
 
-**环境变量**：
+Wiz 的 API 配置优先级：
+
+```
+WIZ_* 环境变量（完全覆盖，高级用户）
+  ↓ 未设置
+ANTHROPIC_* 环境变量（Claude Code / ccswitch 自动设置）
+  ↓ 未设置
+DEEPSEEK_API_KEY（旧版兼容）
+  ↓ 未设置
+硬编码默认值（DeepSeek）
+```
+
+**验证当前配置**：
+
+```bash
+node -e "console.log(require('./api_config').getConfig())"
+```
+
+**高级覆盖**（大多数用户不需要）：
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `WIZ_API_KEY` | API Key（优先级最高） | — |
-| `WIZ_BASE_URL` | API 基础地址 | `https://api.deepseek.com` |
-| `WIZ_FAST_MODEL` | 快速模型（记忆提取、技能推荐） | `deepseek-v4-flash` |
-| `WIZ_STRONG_MODEL` | 强力模型（自进化审查、复杂推理） | `deepseek-v4-pro[1m]` |
+| `WIZ_API_KEY` | API Key | 跟随 Claude Code |
+| `WIZ_BASE_URL` | API 基础地址 | 跟随 Claude Code |
+| `WIZ_FAST_MODEL` | 快速模型（记忆提取、技能推荐） | 跟随 Claude Code |
+| `WIZ_STRONG_MODEL` | 强力模型（自进化审查、复杂推理） | 跟随 Claude Code |
 | `WIZ_API_STYLE` | API 风格：`openai` / `anthropic`（空=自动检测） | 自动 |
-
-> 兼容旧变量名：`DEEPSEEK_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN` 仍可用作 fallback。
-
-**Windows（推荐）**：
-
-```cmd
-:: DeepSeek（默认）
-setx WIZ_API_KEY sk-xxx
-
-:: 或切换到其他 OpenAI 兼容 API（如 OpenRouter、本地模型等）
-setx WIZ_API_KEY your-key
-setx WIZ_BASE_URL https://openrouter.ai/api
-setx WIZ_FAST_MODEL openai/gpt-4o-mini
-setx WIZ_STRONG_MODEL openai/gpt-4o
-```
-
-**Linux / macOS**：
-
-```bash
-# DeepSeek（默认）
-echo 'export WIZ_API_KEY=sk-xxx' >> ~/.bashrc
-source ~/.bashrc
-```
-
-**常用 API 配置示例**：
-
-```bash
-# DeepSeek（默认，无需额外配置）
-setx WIZ_API_KEY sk-xxx
-
-# OpenAI
-setx WIZ_API_KEY sk-xxx
-setx WIZ_BASE_URL https://api.openai.com
-setx WIZ_FAST_MODEL gpt-4o-mini
-setx WIZ_STRONG_MODEL gpt-4o
-
-# OpenRouter（聚合多模型）
-setx WIZ_API_KEY sk-or-xxx
-setx WIZ_BASE_URL https://openrouter.ai/api
-setx WIZ_FAST_MODEL openai/gpt-4o-mini
-setx WIZ_STRONG_MODEL anthropic/claude-sonnet-4-20250514
-
-# 本地模型（Ollama / LM Studio）
-setx WIZ_API_KEY ollama
-setx WIZ_BASE_URL http://localhost:11434
-setx WIZ_FAST_MODEL qwen2.5:7b
-setx WIZ_STRONG_MODEL qwen2.5:32b
-```
-
-> **验证**：新开终端，运行 `node -e "console.log(require('./api_config').getConfig())"` 查看当前配置。
 
 ### 6. 配置 MCP 服务器（可选）
 
