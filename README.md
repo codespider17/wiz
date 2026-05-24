@@ -13,6 +13,36 @@
 
 ---
 
+## 快速开始（5 分钟）
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/codespider17/wiz.git
+cd wiz
+
+# 2. 安装依赖
+npm install
+pip install jieba
+
+# 3. 编译零窗口启动器（可选，不编译也能用）
+build_launcher.bat
+
+# 4. 复制启动文件到公共目录
+copy launcher.exe C:\Users\Public\
+copy run_*.vbs C:\Users\Public\
+
+# 5. 设置 API Key
+setx DEEPSEEK_API_KEY sk-xxx
+
+# 6. 配置 Claude Code（编辑 ~/.claude/settings.json，添加 hooks）
+# 7. 配置 CLAUDE.md（添加 @../wiz/injection.md）
+# 8. 重启 Claude Code
+```
+
+详细步骤见下方安装章节。
+
+---
+
 ## 总览
 
 Wiz 给 Claude Code 加装了一层完整的认知系统。它不是插件——它是引擎。
@@ -314,6 +344,12 @@ npm install
 pip install jieba
 ```
 
+> **Windows 用户注意**：`better-sqlite3` 需要 C++ 编译工具。如果 `npm install` 报错，先安装：
+> ```bash
+> npm install -g windows-build-tools
+> ```
+> 或者安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（勾选"使用 C++ 的桌面开发"）。
+
 ### 2. 编译 launcher.exe（零窗口启动的关键）
 
 ```bash
@@ -360,27 +396,25 @@ csc /target:winexe launcher.cs /out:launcher.exe
         ]
       }
     ]
-  },
-  "mcpServers": {
-    "wiz": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["C:/path/to/wiz/daemon.py"],
-      "env": {}
-    }
   }
 }
 ```
 
 > **路径规范**：使用正斜杠（`C:/Users/Public/`）而非反斜杠，避免 CC 内部反斜杠转义导致路径损坏。
+> **MCP 服务器**配置见下方第 6 步。
 
 ### 4. 配置 CLAUDE.md
+
+在你的用户目录下创建或编辑 `~/.claude/CLAUDE.md`（全局生效），或在项目根目录创建 `.claude/CLAUDE.md`（仅该项目）：
 
 ```markdown
 所有长期记忆及技能由 Wiz 管理。
 当 injection.md 推荐技能时，必须用 Skill 工具调用。
-!include C:/path/to/wiz/injection.md
+@../wiz/injection.md
 ```
+
+> **注意**：使用 `@path` 语法（不是 `!include`）。路径是相对于 CLAUDE.md 文件位置的相对路径。
+> 如果 wiz 在 `C:\Users\你的用户名\wiz`，CLAUDE.md 在 `C:\Users\你的用户名\.claude\CLAUDE.md`，则路径为 `@../wiz/injection.md`。
 
 ### 5. 设置 API Key
 
@@ -391,15 +425,70 @@ csc /target:winexe launcher.cs /out:launcher.exe
 | Worker 提取 + 注入精选 | `deepseek-v4-flash` | `/v1/chat/completions`（OpenAI 兼容） |
 | 自进化审查 | `deepseek-v4-pro` | `/anthropic/v1/messages`（Anthropic 兼容） |
 
-```bash
-export DEEPSEEK_API_KEY=sk-xxx
+去 [platform.deepseek.com](https://platform.deepseek.com) 注册获取 API Key。
+
+**Windows（推荐）**：
+
+```cmd
+:: 永久设置环境变量（新开终端生效）
+setx DEEPSEEK_API_KEY sk-xxx
+
+:: 当前终端立即生效
+set DEEPSEEK_API_KEY=sk-xxx
 ```
 
-去 [platform.deepseek.com](https://platform.deepseek.com) 注册即可获取。
+**Linux / macOS**：
 
-### 6. 重启 Claude Code
+```bash
+# 写入 shell 配置文件（永久）
+echo 'export DEEPSEEK_API_KEY=sk-xxx' >> ~/.bashrc
+source ~/.bashrc
+```
 
-首次启动后，Worker 自动在后台启动（零窗口）。
+> **验证**：新开一个终端，运行 `echo %DEEPSEEK_API_KEY%`（Windows）或 `echo $DEEPSEEK_API_KEY`（Linux/Mac），确认能看到你的 key。
+
+### 6. 配置 MCP 服务器（可选）
+
+如果需要使用 MCP 工具（记忆搜索、图谱操作等），在 `settings.json` 的 `mcpServers` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "wiz": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:/Users/你的用户名/wiz/daemon.py"],
+      "env": {}
+    }
+  }
+}
+```
+
+> 将 `C:/Users/你的用户名/wiz/daemon.py` 替换为你的实际路径。
+
+### 7. 重启 Claude Code
+
+关闭所有 Claude Code 窗口，重新打开。
+
+### 8. 验证安装
+
+在 wiz 项目目录下执行以下检查：
+
+```bash
+# 1. 检查 injection.md 是否生成（SessionStart hook 触发后产生）
+ls -la injection.md
+
+# 2. 检查 Worker 心跳（应在 60 秒内更新）
+cat .worker.heartbeat
+
+# 3. 检查数据库是否初始化
+node -e "const i = require('./index'); i.init(); console.log(i.getStats())"
+
+# 4. 检查 API Key 是否生效
+node -e "console.log(process.env.DEEPSEEK_API_KEY ? 'API Key OK' : 'API Key NOT SET')"
+```
+
+如果第 4 步显示 `API Key NOT SET`，回到第 5 步检查环境变量设置。
 
 ---
 
@@ -479,19 +568,22 @@ CC Hook 触发 → wscript.exe (GUI应用，无控制台)
 ### 查看 Worker 状态
 
 ```bash
-cat wiz/.worker.heartbeat
-cat wiz/.worker.pid
-tail -f wiz/worker.log
+# 在 wiz 项目目录下执行
+cat .worker.heartbeat
+cat .worker.pid
+tail -f worker.log
 ```
 
 ### 手动操作
 
+以下命令均在 wiz 项目目录下执行：
+
 ```bash
 # 启动 Worker（零窗口）
-node wiz/start-worker.js
+node start-worker.js
 
 # 手动触发会话结束处理
-node wiz/consolidate.js
+node consolidate.js
 
 # 查看数据库统计（含 tier 分布 + raw_episodic 数量）
 node -e "const i = require('./index'); i.init(); console.log(i.getStats())"
@@ -522,6 +614,19 @@ node -e "const i = require('./index'); i.init(); console.log(i.searchTiered('关
 
 ## 常见问题
 
+**npm install 报错 / node-gyp 失败？**
+`better-sqlite3` 需要 C++ 编译工具。安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（勾选"使用 C++ 的桌面开发"），然后重新 `npm install`。
+
+**API Key 不生效？**
+- 确认用 `setx`（不是 `set`）设置了永久环境变量
+- `setx` 设置后需要**重新打开终端**才生效
+- 运行 `node -e "console.log(process.env.DEEPSEEK_API_KEY)"` 验证
+
+**injection.md 没有生成？**
+- 检查 `settings.json` 的 hooks 配置是否正确
+- 确认 `wscript.exe` 路径存在（`C:/Users/Public/run_inject_start.vbs`）
+- 手动运行 `node inject.js` 测试
+
 **会影响 CC 启动速度吗？**
 不会。注入 Phase 0-1 在本地瞬间完成（零 API 延迟），AI 精选在后台异步运行。
 
@@ -532,10 +637,10 @@ node -e "const i = require('./index'); i.init(); console.log(i.searchTiered('关
 V3 的智能淘汰 + 存储管理双重保障：tier 自动降级淘汰 + 50MB/100MB 存储阈值自动清理。
 
 **支持其他 API 吗？**
-支持任何 OpenAI 兼容 API。改 `lib/api.js` 中的端点和模型名即可。
+支持任何 OpenAI 兼容 API。修改 `inject.js` 和 `consolidate.js` 中的 `DEEPSEEK_BASE_URL` 和模型名即可。
 
 **launcher.exe 弹出窗口？**
-确保编译时使用 `CreateNoWindow=true`。如果不想编译，可直接用 `node inject.js`（会有短暂 cmd 闪过）。
+确保编译时使用 `/target:winexe`（不是 `/target:exe`）。如果不想编译，可直接用 `node inject.js`（会有短暂 cmd 闪过）。
 
 **隐私怎么保护？**
 三层过滤：HERMES_PROMPT 明确指示不提取 PII，`privacy_filter.js` 用正则拦截 + CJK 长度感知，`consolidate.js` 内容验证过滤系统噪声。
