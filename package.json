@@ -1,6 +1,6 @@
 {
   "name": "wiz",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Cognitive engine for Claude Code",
   "dependencies": {
     "better-sqlite3": "^12.10.0"

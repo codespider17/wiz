@@ -4,6 +4,115 @@ const path = require('path')
 const ROOT = path.dirname(__filename)
 const api = require('./api_config')
 
+// ---- Transcript helpers (inlined from former lib/transcript.js) ----
+const HOME = process.env.HOME || process.env.USERPROFILE
+const CACHE_FILE = path.join(ROOT, '.transcript_dir_cache')
+let _transcriptDir = null
+
+function discoverTranscriptDir() {
+  if (_transcriptDir && fs.existsSync(_transcriptDir)) return _transcriptDir
+  try {
+    const cached = fs.readFileSync(CACHE_FILE, 'utf-8').trim()
+    if (cached && fs.existsSync(cached)) {
+      const hasJsonl = fs.readdirSync(cached).some(f => f.endsWith('.jsonl'))
+      if (hasJsonl) { _transcriptDir = cached; return cached }
+    }
+  } catch(e) {}
+  const projectsDir = path.join(HOME, '.claude', 'projects')
+  try {
+    if (!fs.existsSync(projectsDir)) return null
+    let best = null, bestMtime = 0
+    for (const d of fs.readdirSync(projectsDir)) {
+      const full = path.join(projectsDir, d)
+      try {
+        if (!fs.statSync(full).isDirectory()) continue
+        const jsonlFiles = fs.readdirSync(full).filter(f => f.endsWith('.jsonl'))
+        if (!jsonlFiles.length) continue
+        const newest = Math.max(...jsonlFiles.map(f => fs.statSync(path.join(full, f)).mtimeMs))
+        if (newest > bestMtime) { bestMtime = newest; best = full }
+      } catch(e2) {}
+    }
+    if (best) { _transcriptDir = best; try { fs.writeFileSync(CACHE_FILE, best, 'utf-8') } catch(e2) {} ; return best }
+  } catch(e) {}
+  const fallback = path.join(HOME, '.claude', 'projects', 'C--Users-----')
+  if (fs.existsSync(fallback)) { _transcriptDir = fallback; return fallback }
+  return null
+}
+
+function getTranscriptDir() {
+  if (!_transcriptDir) return discoverTranscriptDir()
+  return _transcriptDir
+}
+
+function getMemoryDir() {
+  const td = getTranscriptDir()
+  if (!td) return null
+  const memDir = path.join(td, 'memory')
+  if (!fs.existsSync(memDir)) fs.mkdirSync(memDir, { recursive: true })
+  return memDir
+}
+
+function findLatest() {
+  try {
+    const dir = getTranscriptDir()
+    if (!dir) return null
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtime, path: path.join(dir, f) }))
+      .sort((a, b) => b.mtime - a.mtime)
+    return files[0] || null
+  } catch(e) { return null }
+}
+
+function findPrevious() {
+  try {
+    const dir = getTranscriptDir()
+    if (!dir) return null
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtime, path: path.join(dir, f) }))
+      .sort((a, b) => b.mtime - a.mtime)
+    return files.length >= 2 ? files[1] : null
+  } catch(e) { return null }
+}
+
+function readTail(filePath, N) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    const lines = raw.split('\n').filter(Boolean)
+    return lines.slice(-N)
+  } catch(e) { return [] }
+}
+
+function saveAutoMemory(name, description, type, body) {
+  try {
+    const memDir = getMemoryDir()
+    if (!memDir) return false
+    const fileName = `${name}.md`
+    const filePath = path.join(memDir, fileName)
+    const frontmatter = `---
+name: ${name}
+description: "${(description || '').replace(/"/g, '\\"')}"
+metadata:
+  type: ${type || 'project'}
+---
+${body}`
+    fs.writeFileSync(filePath, frontmatter, 'utf-8')
+    const indexFile = path.join(memDir, 'MEMORY.md')
+    let index = ''
+    try { index = fs.readFileSync(indexFile, 'utf-8') } catch(e) {}
+    const entryLine = `- [${description || name}](${fileName}) — ${body.substring(0, 80).replace(/\n/g, ' ')}`
+    if (index.includes(fileName)) {
+      const lines = index.split('\n')
+      const updated = lines.map(l => l.includes(fileName) ? entryLine : l).join('\n')
+      fs.writeFileSync(indexFile, updated, 'utf-8')
+    } else {
+      fs.writeFileSync(indexFile, index.trimEnd() + '\n' + entryLine + '\n', 'utf-8')
+    }
+    return true
+  } catch(e) { return false }
+}
+
 // Content validation: skip system error messages and non-project content
 function isValidContent(text, minLen = 20) {
   if (!text || text.length < minLen) return false
@@ -24,18 +133,16 @@ function callAPI(messages) {
 
 // ---- Read transcript context (no DB needed, runs even if index module fails) ----
 function readTranscriptContext() {
-  const transcriptLib = require(path.join(ROOT, 'lib', 'transcript'))
-
   // Race condition guard: SessionEnd is async:true, new session may have newer transcript
   // If the newest file has <20 entries, it's likely a fresh new session — use previous file
-  const latestFile = transcriptLib.findLatest()
-  const prevFile = transcriptLib.findPrevious()
+  const latestFile = findLatest()
+  const prevFile = findPrevious()
 
   let targetFile = latestFile
   if (latestFile && prevFile) {
     try {
-      const latestLines = transcriptLib.readTail(latestFile.path, 30)
-      const prevLines = transcriptLib.readTail(prevFile.path, 30)
+      const latestLines = readTail(latestFile.path, 30)
+      const prevLines = readTail(prevFile.path, 30)
       // If latest has very few entries (<20) or is mostly continuation markers, use previous
       const realEntries = latestLines.filter(l => {
         try {
@@ -55,9 +162,9 @@ function readTranscriptContext() {
     } catch(e) {}
   }
 
-  if (!targetFile) return { transcriptLib, context: '', rawLines: [], transcriptPath: null }
+  if (!targetFile) return { context: '', rawLines: [], transcriptPath: null }
 
-  const rawLines = transcriptLib.readTail(targetFile.path, 300)
+  const rawLines = readTail(targetFile.path, 300)
   let context = rawLines.map(l => {
     try {
       const entry = JSON.parse(l)
@@ -82,7 +189,7 @@ function readTranscriptContext() {
       context = ''
     }
   }
-  return { transcriptLib, context, rawLines, transcriptPath: targetFile.path }
+  return { context, rawLines, transcriptPath: targetFile.path }
 }
 
 // ---- Helpers for cleaning up extracted messages ----
@@ -136,7 +243,7 @@ function extractLastMessages(rawLines) {
 }
 
 // ---- Write auto-memory from transcript context (no AI needed) ----
-function writeAutoMemory(transcriptLib, context, rawLines) {
+function writeAutoMemory(context, rawLines) {
   if (!context || !isValidContent(context, 20)) return false
   try {
     // Primary: extract from raw transcript entries (handles CC's tool_result-heavy format)
@@ -171,8 +278,8 @@ function writeAutoMemory(transcriptLib, context, rawLines) {
     const body = `上一句: ${lastUserText || '(未检测到)'}
 此前: ${firstUserText || lastUserText || '(未检测到)'}
 上次: ${lastAssistantText || '(未检测到)'}`
-    transcriptLib.saveAutoMemory('wiz_last_session', 'Wiz last session summary', 'project', body)
-    process.stdout.write(`[overmind] auto-memory wiz_last_session updated\n`)
+    saveAutoMemory('wiz_last_session', 'Wiz last session summary', 'project', body)
+    process.stdout.write(`[wiz] auto-memory wiz_last_session updated\n`)
 
     // Also update CLAUDE.local.md so it doesn't carry stale conversational data
     try {
@@ -190,12 +297,12 @@ function writeAutoMemory(transcriptLib, context, rawLines) {
         fs.writeFileSync(localFile, localContent, 'utf-8')
       }
     } catch(e) {
-      process.stdout.write(`[overmind] CLAUDE.local.md update skipped: ${e.message}\n`)
+      process.stdout.write(`[wiz] CLAUDE.local.md update skipped: ${e.message}\n`)
     }
 
     return true
   } catch(e) {
-    process.stdout.write(`[overmind] auto-memory write failed: ${e.message}\n`)
+    process.stdout.write(`[wiz] auto-memory write failed: ${e.message}\n`)
     return false
   }
 }
@@ -210,16 +317,16 @@ async function consolidate() {
     index.ensureMemoryDirs()
     stats = index.getStats()
   } catch(e) {
-    process.stdout.write(`[overmind] index module unavailable: ${e.message}\n`)
+    process.stdout.write(`[wiz] index module unavailable: ${e.message}\n`)
   }
 
   const sessionId = `s${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
 
   // Read transcript (always works, no DB needed)
-  const { transcriptLib, context, rawLines } = readTranscriptContext()
+  const { context, rawLines } = readTranscriptContext()
 
   // STEP 1: Write auto-memory FIRST — independent of AI, independent of DB
-  writeAutoMemory(transcriptLib, context, rawLines)
+  writeAutoMemory(context, rawLines)
 
   // STEP 2: Generate episode summary via AI — depends on DB (for stats) + AI API
   if (index && context && isValidContent(context, 50)) {
@@ -239,7 +346,7 @@ ${context.substring(0, 2000)}`
         }
         const epFile = path.join(ROOT, 'memory', 'episodic', `${sessionId}.json`)
         fs.writeFileSync(epFile, JSON.stringify(epData, null, 2), 'utf-8')
-        process.stdout.write(`[overmind] episode saved: ${epSummary.substring(0, 80)}...\n`)
+        process.stdout.write(`[wiz] episode saved: ${epSummary.substring(0, 80)}...\n`)
 
         // Update injection.md directly so next session has fresh context even if inject.js fails
         try {
@@ -256,14 +363,14 @@ ${context.substring(0, 2000)}`
                 `$1\n## 上次对话\n${epLine}\n`)
             }
             fs.writeFileSync(injFile, injContent, 'utf-8')
-            process.stdout.write(`[overmind] injection.md updated with episode\n`)
+            process.stdout.write(`[wiz] injection.md updated with episode\n`)
           }
         } catch(e) {
-          process.stdout.write(`[overmind] injection.md update skipped: ${e.message}\n`)
+          process.stdout.write(`[wiz] injection.md update skipped: ${e.message}\n`)
         }
       }
     } catch(e) {
-      process.stdout.write(`[overmind] episode summary failed: ${e.message}\n`)
+      process.stdout.write(`[wiz] episode summary failed: ${e.message}\n`)
     }
   }
 
@@ -273,12 +380,12 @@ ${context.substring(0, 2000)}`
     try {
       const saved = index.saveRawEpisodic(sessionId, transcriptPath)
       if (saved) {
-        process.stdout.write(`[overmind] raw episodic saved for ${sessionId}\n`)
+        process.stdout.write(`[wiz] raw episodic saved for ${sessionId}\n`)
       } else {
-        process.stdout.write(`[overmind] raw episodic skipped (too few messages)\n`)
+        process.stdout.write(`[wiz] raw episodic skipped (too few messages)\n`)
       }
     } catch(e) {
-      process.stdout.write(`[overmind] raw episodic save failed: ${e.message}\n`)
+      process.stdout.write(`[wiz] raw episodic save failed: ${e.message}\n`)
     }
   }
 
@@ -300,9 +407,9 @@ ${context.substring(0, 2000)}`
           extracted++
         }
       }
-      process.stdout.write(`[overmind] extracted ${extracted} facts from session\n`)
+      process.stdout.write(`[wiz] extracted ${extracted} facts from session\n`)
     } catch(e) {
-      process.stdout.write(`[overmind] session extraction failed: ${e.message}\n`)
+      process.stdout.write(`[wiz] session extraction failed: ${e.message}\n`)
     }
   }
 
@@ -345,11 +452,11 @@ ${context.substring(0, 2000)}`
         }
 
         if (refs.length > 0) {
-          process.stdout.write(`[overmind] feedback: ${refs.length}/${injectedKeys.length} memories referenced, recorded helped\n`)
+          process.stdout.write(`[wiz] feedback: ${refs.length}/${injectedKeys.length} memories referenced, recorded helped\n`)
         }
       }
     } catch(e) {
-      process.stdout.write(`[overmind] feedback analysis error: ${e.message}\n`)
+      process.stdout.write(`[wiz] feedback analysis error: ${e.message}\n`)
     }
 
     // ---- SKILL FEEDBACK: Detect invocation + completion ----
@@ -400,7 +507,7 @@ ${context.substring(0, 2000)}`
           for (const sn of invokedSkills) {
             index.recordSkillFeedback(sn, 'completed', '', sessionId, 0.9)
           }
-          process.stdout.write(`[overmind] skill_fb: ${invokedSkills.length} skills completed\n`)
+          process.stdout.write(`[wiz] skill_fb: ${invokedSkills.length} skills completed\n`)
         } else if (invokedSkills.length > 0) {
           for (const sn of invokedSkills) {
             index.recordSkillFeedback(sn, 'failed', '', sessionId, 0.2)
@@ -416,7 +523,7 @@ ${context.substring(0, 2000)}`
         index.syncSkillPrefsToFile()
       }
     } catch(e) {
-      process.stdout.write(`[overmind] skill_fb error: ${e.message}\n`)
+      process.stdout.write(`[wiz] skill_fb error: ${e.message}\n`)
     }
 
     // ---- GRAPH: Ensure graph module is loaded ----
@@ -439,10 +546,10 @@ ${context.substring(0, 2000)}`
         const result = execSync(`python -c "${pyCmd}"`, {
           cwd: ROOT, timeout: 90000, encoding: 'utf-8', windowsHide: true
         })
-        process.stdout.write(`[overmind] hermes_fusion: ${result.trim()}\n`)
+        process.stdout.write(`[wiz] hermes_fusion: ${result.trim()}\n`)
         fs.writeFileSync(HERMES_COUNT_FILE, String(stats.semanticCount))
       } catch(e) {
-        process.stdout.write(`[overmind] hermes_fusion failed: ${e.message}\n`)
+        process.stdout.write(`[wiz] hermes_fusion failed: ${e.message}\n`)
       }
     }
 
@@ -450,24 +557,24 @@ ${context.substring(0, 2000)}`
     try {
       const elimination = index.runSmartElimination()
       if (elimination.rawDeleted > 0 || elimination.promoted > 0 || elimination.demoted > 0 || elimination.archived > 0) {
-        process.stdout.write(`[overmind] elimination: raw_deleted=${elimination.rawDeleted} compressed=${elimination.rawCompressed} promoted=${elimination.promoted} demoted=${elimination.demoted} archived=${elimination.archived}\n`)
+        process.stdout.write(`[wiz] elimination: raw_deleted=${elimination.rawDeleted} compressed=${elimination.rawCompressed} promoted=${elimination.promoted} demoted=${elimination.demoted} archived=${elimination.archived}\n`)
       }
     } catch(e) {
-      process.stdout.write(`[overmind] elimination failed: ${e.message}\n`)
+      process.stdout.write(`[wiz] elimination failed: ${e.message}\n`)
     }
 
     // JS-side pruneIneffective as backup
     const pruned = index.pruneIneffective()
-    if (pruned > 0) process.stdout.write(`[overmind] JS prune: removed ${pruned} ineffective memories\n`)
+    if (pruned > 0) process.stdout.write(`[wiz] JS prune: removed ${pruned} ineffective memories\n`)
 
     const afterStats = index.getStats()
-    process.stdout.write(`[overmind] session ${sessionId} done | mems: ${stats.semanticCount}→${afterStats.semanticCount} | raw_epi: ${afterStats.rawEpisodicCount} | episode: saved\n`)
+    process.stdout.write(`[wiz] session ${sessionId} done | mems: ${stats.semanticCount}→${afterStats.semanticCount} | raw_epi: ${afterStats.rawEpisodicCount} | episode: saved\n`)
 
     // Storage budget check
     try {
       const budget = index.checkStorageBudget()
       if (budget.budget !== 'ok') {
-        process.stdout.write(`[overmind] storage: ${budget.sizeMB.toFixed(1)}MB (${budget.budget}) action=${budget.action}\n`)
+        process.stdout.write(`[wiz] storage: ${budget.sizeMB.toFixed(1)}MB (${budget.budget}) action=${budget.action}\n`)
       }
     } catch(e) {}
   }
@@ -522,7 +629,7 @@ function cleanEpisodic() {
   }
 
   if (deleted > 0 || merged > 0) {
-    process.stdout.write(`[overmind] episodic: deleted ${deleted}, merged ${merged}\n`)
+    process.stdout.write(`[wiz] episodic: deleted ${deleted}, merged ${merged}\n`)
   }
 }
 
@@ -540,7 +647,7 @@ async function main() {
       try {
         const t = fs.statSync(CONSOLIDATE_LOCK).mtimeMs
         if (Date.now() - t < 30000) {
-          process.stdout.write(`[overmind] consolidate skipped: lock held by another instance\n`)
+          process.stdout.write(`[wiz] consolidate skipped: lock held by another instance\n`)
           return // another consolidate running within 30s
         }
         fs.unlinkSync(CONSOLIDATE_LOCK)
@@ -560,11 +667,10 @@ async function main() {
     fs.appendFileSync(logFile, `${new Date().toISOString()} SessionEnd ERROR: ${e.message}\n`)
     // Fallback: even if consolidate() crashes, write auto-memory from raw transcript
     try {
-      const transcriptLib = require(path.join(ROOT, 'lib', 'transcript'))
       // Use prev file to avoid racing with any new session that just started
-      const target = transcriptLib.findPrevious() || transcriptLib.findLatest()
+      const target = findPrevious() || findLatest()
       if (target) {
-        const raw = transcriptLib.readTail(target.path, 300)
+        const raw = readTail(target.path, 300)
         const lines = raw.map(l => {
           try {
             const e = JSON.parse(l)
@@ -604,7 +710,7 @@ async function main() {
             } catch(e4) {}
           }
           const body = `上一句: ${lu || '(fallback)'}\n此前: ${fu || lu || '(fallback)'}\n上次: ${la || '(fallback)'}`
-          transcriptLib.saveAutoMemory('wiz_last_session', 'Wiz last session summary', 'project', body)
+          saveAutoMemory('wiz_last_session', 'Wiz last session summary', 'project', body)
           // Fallback should also update CLAUDE.local.md
           try {
             const homeDir = process.env.USERPROFILE || process.env.HOME || ROOT
