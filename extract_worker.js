@@ -26,7 +26,7 @@ const api = require(path.join(ROOT, 'api_config'))
 const LOG_FILE = path.join(ROOT, 'worker.log')
 const HERMES_PROMPT = fs.readFileSync(path.join(ROOT, 'HERMES_PROMPT.md'), 'utf-8')
 const POLL_INTERVAL = 30000
-const MIN_NEW_LINES = 25
+const MIN_NEW_LINES = 10
 const MAX_LIFETIME = 8 * 60 * 60 * 1000
 
 if (!fs.existsSync(EPISODIC_DIR)) fs.mkdirSync(EPISODIC_DIR, { recursive: true })
@@ -63,23 +63,24 @@ function loadNewLines(filepath, lastPos) {
 
 function compressForExtraction(lines, maxChars) {
   const msgs = []
-  for (let i = 0; i < lines.length && msgs.length < 100; i++) {
+  for (let i = 0; i < lines.length && msgs.length < 300; i++) {
     try {
       const obj = JSON.parse(lines[i])
       const msg = obj.message || {}
       const role = msg.role || 'unknown'
       let content = msg.content || ''
       if (typeof content !== 'string') content = JSON.stringify(content)
-      if (content) msgs.push(`[${role}] ${content.substring(0, 800)}`)
+      if (content) msgs.push(`[${role}] ${content.substring(0, 1500)}`)
     } catch(e) {}
   }
   const text = msgs.join('\n')
   if (text.length <= maxChars) return text
-  return text.substring(0, maxChars)
+  // 截断时保留尾部（后面的话题通常更重要）
+  return text.substring(text.length - maxChars)
 }
 
 async function extractAndSave(lines, sessionId) {
-  const text = compressForExtraction(lines, 30000)
+  const text = compressForExtraction(lines, 80000)
   if (text.length < 200) return 0
 
   const prompt = `${HERMES_PROMPT}
@@ -93,7 +94,7 @@ ${getExistingKeys()}
 请按格式输出每条新发现的事实。`
 
   try {
-    const result = await api.callFast([{ role: 'system', content: HERMES_PROMPT }, { role: 'user', content: prompt }])
+    const result = await api.callFast([{ role: 'user', content: prompt }])
     if (!result) return 0
 
     const index = require(path.join(ROOT, 'index'))

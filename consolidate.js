@@ -133,63 +133,93 @@ function callAPI(messages) {
 
 // ---- Read transcript context (no DB needed, runs even if index module fails) ----
 function readTranscriptContext() {
-  // Race condition guard: SessionEnd is async:true, new session may have newer transcript
-  // If the newest file has <20 entries, it's likely a fresh new session — use previous file
-  const latestFile = findLatest()
-  const prevFile = findPrevious()
-
-  let targetFile = latestFile
-  if (latestFile && prevFile) {
-    try {
-      const latestLines = readTail(latestFile.path, 30)
-      const prevLines = readTail(prevFile.path, 30)
-      // If latest has very few entries (<20) or is mostly continuation markers, use previous
-      const realEntries = latestLines.filter(l => {
+  // Use CLAUDE_CODE_SESSION_ID if available (set by Claude Code during session)
+  // This ensures we process the correct session even when SessionEnd triggers after model switch
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID
+  if (sessionId) {
+    const sessionFile = path.join(getTranscriptDir(), `${sessionId}.jsonl`)
+    if (fs.existsSync(sessionFile)) {
+      const rawLines = readTail(sessionFile, 300)
+      let context = rawLines.map(l => {
         try {
-          const e = JSON.parse(l)
-          // Skip pure system entries (no message role, no conversational content)
-          if (e.isMeta) return false
-          if (!e.message || !e.message.role) return false
-          const c = e.message?.content || ''
-          const t = typeof c === 'string' ? c : (Array.isArray(c) ? c.find(b => b.type === 'text')?.text || '' : '')
-          if (!t || t.length < 3) return false
-          return !t.includes('This session is being continued') && !t.includes('Primary Request') && !t.includes('parentUuid')
-        } catch(e2) { return false }
-      }).length
-      if (realEntries < 20) {
-        targetFile = prevFile
+          const entry = JSON.parse(l)
+          const msg = entry.message || {}
+          const role = msg.role || 'unknown'
+          let content = ''
+          if (typeof msg.content === 'string') content = msg.content
+          else if (Array.isArray(msg.content)) {
+            const tb = msg.content.find(b => b.type === 'text')
+            if (tb) content = tb.text
+          }
+          if (!content || content.includes('parentUuid') || content.includes('sidechain')) return null
+          return `[${role}] ${content.substring(0, 500)}`
+        } catch(e) { return null }
+      }).filter(Boolean).slice(-100).join('\n')
+
+      // Skip if context is mostly env vars / non-conversational noise
+      if (context) {
+        const envVarLines = context.split('\n').filter(l => /^\[(user|assistant)\]\s*[A-Z_][A-Z0-9_]+=/.test(l)).length
+        const totalLines = context.split('\n').filter(Boolean).length
+        if (totalLines > 0 && envVarLines / totalLines > 0.5) {
+          context = ''
+        }
       }
-    } catch(e) {}
-  }
-
-  if (!targetFile) return { context: '', rawLines: [], transcriptPath: null }
-
-  const rawLines = readTail(targetFile.path, 300)
-  let context = rawLines.map(l => {
-    try {
-      const entry = JSON.parse(l)
-      const msg = entry.message || {}
-      const role = msg.role || 'unknown'
-      let content = ''
-      if (typeof msg.content === 'string') content = msg.content
-      else if (Array.isArray(msg.content)) {
-        const tb = msg.content.find(b => b.type === 'text')
-        if (tb) content = tb.text
-      }
-      if (!content || content.includes('parentUuid') || content.includes('sidechain')) return null
-      return `[${role}] ${content.substring(0, 500)}`
-    } catch(e) { return null }
-  }).filter(Boolean).slice(-100).join('\n')
-
-  // Skip if context is mostly env vars / non-conversational noise
-  if (context) {
-    const envVarLines = context.split('\n').filter(l => /^\[(user|assistant)\]\s*[A-Z_][A-Z0-9_]+=/.test(l)).length
-    const totalLines = context.split('\n').filter(Boolean).length
-    if (totalLines > 0 && envVarLines / totalLines > 0.5) {
-      context = ''
+      return { context, rawLines, transcriptPath: sessionFile }
     }
   }
-  return { context, rawLines, transcriptPath: targetFile.path }
+
+  // Fallback: find the most recently modified file that existed before SessionEnd trigger
+  // Use file modification time to find the session that just ended
+  const now = Date.now()
+  const transcriptDir = getTranscriptDir()
+  if (!transcriptDir) return { context: '', rawLines: [], transcriptPath: null }
+
+  try {
+    const files = fs.readdirSync(transcriptDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => {
+        const fullPath = path.join(transcriptDir, f)
+        const stat = fs.statSync(fullPath)
+        return { name: f, path: fullPath, mtime: stat.mtimeMs, size: stat.size }
+      })
+      .filter(f => f.size > 1000) // Skip tiny/empty files
+      .sort((a, b) => b.mtime - a.mtime)
+
+    // Find the file that was modified most recently but NOT in the last 2 seconds
+    // (to avoid the race condition where new session's file is already being written)
+    const targetFile = files.find(f => now - f.mtime > 2000) || files[0]
+
+    if (targetFile) {
+      const rawLines = readTail(targetFile.path, 300)
+      let context = rawLines.map(l => {
+        try {
+          const entry = JSON.parse(l)
+          const msg = entry.message || {}
+          const role = msg.role || 'unknown'
+          let content = ''
+          if (typeof msg.content === 'string') content = msg.content
+          else if (Array.isArray(msg.content)) {
+            const tb = msg.content.find(b => b.type === 'text')
+            if (tb) content = tb.text
+          }
+          if (!content || content.includes('parentUuid') || content.includes('sidechain')) return null
+          return `[${role}] ${content.substring(0, 500)}`
+        } catch(e) { return null }
+      }).filter(Boolean).slice(-100).join('\n')
+
+      // Skip if context is mostly env vars / non-conversational noise
+      if (context) {
+        const envVarLines = context.split('\n').filter(l => /^\[(user|assistant)\]\s*[A-Z_][A-Z0-9_]+=/.test(l)).length
+        const totalLines = context.split('\n').filter(Boolean).length
+        if (totalLines > 0 && envVarLines / totalLines > 0.5) {
+          context = ''
+        }
+      }
+      return { context, rawLines, transcriptPath: targetFile.path }
+    }
+  } catch(e) {}
+
+  return { context: '', rawLines: [], transcriptPath: null }
 }
 
 // ---- Helpers for cleaning up extracted messages ----
@@ -331,10 +361,19 @@ async function consolidate() {
   // STEP 2: Generate episode summary via AI — depends on DB (for stats) + AI API
   if (index && context && isValidContent(context, 50)) {
     try {
-      const epPrompt = `Summarize this Claude Code session in 2-3 sentences in Chinese. Focus on: what was accomplished, key decisions made, and what's pending. Be concise.
+      const epPrompt = `用中文总结这次 Claude Code 会话。要求：
+1. 列出讨论过的**所有**话题（不遗漏，包括闲聊、提问、讨论等）
+2. 每个话题一句话概括
+3. 最后一句：本次会话的最后一条用户消息是什么
+
+格式：
+话题1: ...
+话题2: ...
+...
+最后消息: ...
 
 Session context:
-${context.substring(0, 2000)}`
+${context.substring(0, 4000)}`
 
       const epSummary = await callAPI([{ role: 'user', content: epPrompt }])
       if (epSummary) {
@@ -347,6 +386,20 @@ ${context.substring(0, 2000)}`
         const epFile = path.join(ROOT, 'memory', 'episodic', `${sessionId}.json`)
         fs.writeFileSync(epFile, JSON.stringify(epData, null, 2), 'utf-8')
         process.stdout.write(`[wiz] episode saved: ${epSummary.substring(0, 80)}...\n`)
+
+        // Also update wiz_last_session.md with full AI summary
+        try {
+          const homeDir = process.env.USERPROFILE || process.env.HOME || ROOT
+          const memDir = path.join(homeDir, '.claude', 'projects', 'C--Users-----', 'memory')
+          const sessionFile = path.join(memDir, 'wiz_last_session.md')
+          if (fs.existsSync(memDir)) {
+            const sessionContent = `---\nname: wiz_last_session\ndescription: "Wiz last session summary"\nmetadata:\n  type: project\n---\n${epSummary.trim()}`
+            fs.writeFileSync(sessionFile, sessionContent, 'utf-8')
+            process.stdout.write(`[wiz] wiz_last_session.md updated with AI summary\n`)
+          }
+        } catch(e) {
+          process.stdout.write(`[wiz] wiz_last_session.md update skipped: ${e.message}\n`)
+        }
 
         // Update injection.md directly so next session has fresh context even if inject.js fails
         try {
