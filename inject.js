@@ -201,7 +201,9 @@ async function selectMemoriesAI(userTask, allMems, limit = 5) {
       const eff = (m.effectiveness_score || 0.5)
       const inj = (m.injected_count || 0)
       const effBoost = eff * 1.5 + (inj > 0 ? 0.1 : 0)
-      return Object.assign({}, m, {kscore: s + effBoost})
+      // Tier boost: hot tier memories get priority
+      const tierBoost = (m.tier === 'hot') ? 0.3 : (m.tier === 'frozen') ? 0.4 : 0
+      return Object.assign({}, m, {kscore: s + effBoost + tierBoost})
     })
     scored.sort((a, b) => b.kscore - a.kscore)
     const shortlist = scored.slice(0, 40)
@@ -445,6 +447,107 @@ function loadPreviousEpisode() {
   } catch(e) { return null }
 }
 
+// Get latest user message from current transcript (real-time, no SessionEnd required)
+function getLatestUserMessage() {
+  try {
+    const files = fs.readdirSync(TRANSCRIPT_DIR)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(TRANSCRIPT_DIR, f)).mtime }))
+      .sort((a, b) => b.mtime - a.mtime)
+    if (!files.length) return null
+
+    // Scan recent transcript files to find the last real topic (not meta-questions)
+    const filesToCheck = files.slice(0, 10)
+
+    // Meta-questions about conversation continuity (should be skipped to find actual topic)
+    const metaQuestionPattern = /(我们)?上(一|个|次)(句|话题|聊天|对话|会话)|聊的(什么|啥)|说了(什么|啥)|刚才.*聊|之前.*聊|上次.*说|什么.*话题/
+
+    for (const file of filesToCheck) {
+      const filePath = path.join(TRANSCRIPT_DIR, file.name)
+      const raw = fs.readFileSync(filePath, 'utf-8')
+      const lines = raw.split('\n').filter(Boolean)
+
+      // Scan backwards to find last non-meta user message in this file
+      let lastUserText = ''
+      let lastAssistantText = ''
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const e = JSON.parse(lines[i])
+          if (e.isMeta) continue
+          const msg = e.message || {}
+          const role = msg.role || e.type || 'unknown'
+          let content = ''
+          if (typeof msg.content === 'string') content = msg.content
+          else if (Array.isArray(msg.content)) {
+            const tb = msg.content.find(b => b.type === 'text')
+            if (tb) content = tb.text
+          }
+          if (!content || content.length < 3) continue
+          if (content.includes('parentUuid') || content.includes('sidechain')) continue
+          if (content.includes('This session is being continued')) continue
+          if (content.includes('Primary Request and Intent:')) continue
+
+          // Strip angle tags
+          let cleaned = content
+          let prev
+          do {
+            prev = cleaned
+            cleaned = cleaned.replace(/<[\w-]+>[\s\S]*?<\/[\w-]+>/g, '')
+          } while (cleaned !== prev)
+          cleaned = cleaned.replace(/<[\w-]+\/>/g, '').replace(/<\/?[\w-]+>/g, '').trim()
+
+          if (cleaned.length < 3) continue
+
+          // Skip command messages
+          if (cleaned.includes('<command-message') || cleaned.includes('<command-name')) continue
+          if (/^(Caveat:|Bye!|The messages below)/.test(cleaned)) continue
+
+          // Skip very long user messages (likely copy-pasted content)
+          if (role === 'user' && cleaned.length < 500) {
+            if (!lastUserText) {
+              // Skip meta-questions about conversation continuity
+              if (!metaQuestionPattern.test(cleaned)) {
+                lastUserText = cleaned.substring(0, 200)
+              }
+              // If it IS a meta-question, keep scanning backwards for the real topic
+            }
+          }
+          if (role === 'assistant' && !lastAssistantText) {
+            lastAssistantText = cleaned.substring(0, 200)
+          }
+          // Found both, stop scanning this file
+          if (lastUserText && lastAssistantText) break
+        } catch(e) {}
+      }
+
+      // Return the first file that has a non-meta user message
+      if (lastUserText) {
+        // Update wiz_last_session.md in real-time
+        try {
+          const homeDir = process.env.USERPROFILE || process.env.HOME || ROOT
+          const memDir = path.join(homeDir, '.claude', 'projects', 'C--Users-----', 'memory')
+          if (fs.existsSync(memDir)) {
+            const body = `上一句: ${lastUserText}\n上次: ${lastAssistantText || '(未检测到)'}`
+            const frontmatter = `---
+name: wiz_last_session
+description: "Wiz last session summary - real-time update"
+metadata:
+  type: project
+---
+${body}`
+            fs.writeFileSync(path.join(memDir, 'wiz_last_session.md'), frontmatter, 'utf-8')
+          }
+        } catch(e) {}
+
+        return lastUserText
+      }
+    }
+
+    // No non-meta user message found in any file
+    return null
+  } catch(e) { return null }
+}
+
 // Get last few exchanges from current transcript for short-term context
 function getRecentContext() {
   try {
@@ -497,7 +600,13 @@ function buildInjection(mems, skills, stats, projCtx, userTask, issueMems, taskP
   }).join('\n\n')
 
   const prevEpisode = loadPreviousEpisode()
-  const continuityText = prevEpisode ? `\n## 上次对话\n${prevEpisode.substring(0, 300)}` : ''
+  const latestUserMsg = getLatestUserMessage()
+  // Priority: latest user message (real-time) > previous episode (from SessionEnd)
+  const continuityText = latestUserMsg
+    ? `\n## 上次对话\n上一句: ${latestUserMsg}`
+    : prevEpisode
+      ? `\n## 上次对话\n${prevEpisode.substring(0, 300)}`
+      : ''
 
   const recentContext = getRecentContext()
   const recentText = recentContext ? `\n## 最近消息\n${recentContext}` : ''

@@ -80,7 +80,7 @@ function readTranscriptContext() {
     } catch(e) {}
   }
 
-  if (!targetFile) return { transcriptLib, context: '', rawLines: [] }
+  if (!targetFile) return { transcriptLib, context: '', rawLines: [], transcriptPath: null }
 
   const rawLines = transcriptLib.readTail(targetFile.path, 300)
   let context = rawLines.map(l => {
@@ -107,7 +107,7 @@ function readTranscriptContext() {
       context = ''
     }
   }
-  return { transcriptLib, context, rawLines }
+  return { transcriptLib, context, rawLines, transcriptPath: targetFile.path }
 }
 
 // ---- Helpers for cleaning up extracted messages ----
@@ -292,6 +292,21 @@ ${context.substring(0, 2000)}`
     }
   }
 
+  // STEP 2.5: Save raw transcript (全量保存)
+  const { transcriptPath } = readTranscriptContext()
+  if (index && transcriptPath) {
+    try {
+      const saved = index.saveRawEpisodic(sessionId, transcriptPath)
+      if (saved) {
+        process.stdout.write(`[overmind] raw episodic saved for ${sessionId}\n`)
+      } else {
+        process.stdout.write(`[overmind] raw episodic skipped (too few messages)\n`)
+      }
+    } catch(e) {
+      process.stdout.write(`[overmind] raw episodic save failed: ${e.message}\n`)
+    }
+  }
+
   // Extract key facts from session (needs index/DB + AI)
   if (index && context && isValidContent(context, 50)) {
     try {
@@ -456,12 +471,30 @@ ${context.substring(0, 2000)}`
       }
     }
 
+    // Smart elimination: tier management + raw episodic cleanup
+    try {
+      const elimination = index.runSmartElimination()
+      if (elimination.rawDeleted > 0 || elimination.promoted > 0 || elimination.demoted > 0 || elimination.archived > 0) {
+        process.stdout.write(`[overmind] elimination: raw_deleted=${elimination.rawDeleted} compressed=${elimination.rawCompressed} promoted=${elimination.promoted} demoted=${elimination.demoted} archived=${elimination.archived}\n`)
+      }
+    } catch(e) {
+      process.stdout.write(`[overmind] elimination failed: ${e.message}\n`)
+    }
+
     // JS-side pruneIneffective as backup
     const pruned = index.pruneIneffective()
     if (pruned > 0) process.stdout.write(`[overmind] JS prune: removed ${pruned} ineffective memories\n`)
 
     const afterStats = index.getStats()
-    process.stdout.write(`[overmind] session ${sessionId} done | mems: ${stats.semanticCount}→${afterStats.semanticCount} | episode: saved\n`)
+    process.stdout.write(`[overmind] session ${sessionId} done | mems: ${stats.semanticCount}→${afterStats.semanticCount} | raw_epi: ${afterStats.rawEpisodicCount} | episode: saved\n`)
+
+    // Storage budget check
+    try {
+      const budget = index.checkStorageBudget()
+      if (budget.budget !== 'ok') {
+        process.stdout.write(`[overmind] storage: ${budget.sizeMB.toFixed(1)}MB (${budget.budget}) action=${budget.action}\n`)
+      }
+    } catch(e) {}
   }
 
   // Episodic tiered retention (no DB needed)

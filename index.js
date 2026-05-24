@@ -32,6 +32,34 @@ function init() {
   try { db.exec('ALTER TABLE semantic ADD COLUMN last_effective_at TEXT') } catch(e) {}
   try { db.exec('ALTER TABLE semantic ADD COLUMN ineffective_count INTEGER DEFAULT 0') } catch(e) {}
   try { db.exec('ALTER TABLE semantic ADD COLUMN injected_count INTEGER DEFAULT 0') } catch(e) {}
+  // Tier system for smart elimination
+  try { db.exec("ALTER TABLE semantic ADD COLUMN tier TEXT DEFAULT 'hot'") } catch(e) {}
+  try { db.exec('ALTER TABLE semantic ADD COLUMN tier_updated_at TEXT') } catch(e) {}
+  try { db.exec('ALTER TABLE semantic ADD COLUMN importance_score REAL DEFAULT 0.5') } catch(e) {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_semantic_tier ON semantic(tier, tier_updated_at)') } catch(e) {}
+  // Backfill tier_updated_at for existing rows
+  try { db.prepare("UPDATE semantic SET tier_updated_at = updated_at WHERE tier_updated_at IS NULL").run() } catch(e) {}
+
+  // Raw episodic storage — full conversation records
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS raw_episodic (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT UNIQUE NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_accessed TEXT,
+      access_count INTEGER DEFAULT 0,
+      message_count INTEGER DEFAULT 0,
+      user_excerpt TEXT DEFAULT '',
+      assistant_excerpt TEXT DEFAULT '',
+      topic_keywords TEXT DEFAULT '',
+      importance_score REAL DEFAULT 0.5,
+      compressed INTEGER DEFAULT 0,
+      transcript_data TEXT
+    )
+  `)
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_raw_epi_created ON raw_episodic(created_at)') } catch(e) {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_raw_epi_importance ON raw_episodic(importance_score)') } catch(e) {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_raw_epi_session ON raw_episodic(session_id)') } catch(e) {}
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS procedural (
@@ -150,6 +178,281 @@ function saveSemantic(key, content, tags = '', sourceSession = null, dedupKey = 
     db.prepare('INSERT INTO semantic_fts(key, content, tags) VALUES (?,?,?)').run(key, content, tags)
   }
   return true
+}
+
+// ---- RAW EPISODIC STORAGE ----
+
+function extractTopicKeywords(messages) {
+  const text = messages.map(m => m.content).join(' ')
+  // Technical keywords
+  const techWords = text.match(/\b(function|class|api|db|sql|git|npm|node|python|error|bug|fix|config|deploy|docker|test|hook|memory|inject|consolidate|skill|agent|token|auth|cache|async|await|promise|callback|event|stream|file|path|fs|http|https|request|response|json|xml|html|css|js|ts|react|vue|angular|express|koa|fastify|next|nuxt|vite|webpack|babel|eslint|prettier|jest|mocha|chai|playwright|cypress|selenium)\b/gi) || []
+  // CJK bigrams (Chinese 2-char combinations)
+  const cjkBigrams = []
+  const cjkText = text.replace(/[^一-鿿]/g, '')
+  for (let i = 0; i < cjkText.length - 1; i++) {
+    cjkBigrams.push(cjkText.substring(i, i + 2))
+  }
+  // Count frequency, take top 10
+  const freq = {}
+  for (const w of [...techWords, ...cjkBigrams]) {
+    const k = w.toLowerCase()
+    freq[k] = (freq[k] || 0) + 1
+  }
+  return Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([k]) => k)
+    .join(',')
+}
+
+function calcImportance(messages) {
+  let score = 0.3 // baseline
+  const text = messages.map(m => m.content).join(' ')
+
+  // Signal 1: Technical content density
+  const techSignals = /\b(function|class|import|const|let|var|error|bug|fix|test|api|http|db|sql|config|deploy|git|npm|node|python|hook|memory|inject|consolidate|skill)\b/i
+  if (techSignals.test(text)) score += 0.2
+
+  // Signal 2: Conversation depth
+  if (messages.length > 20) score += 0.1
+  if (messages.length > 50) score += 0.1
+
+  // Signal 3: Problem-solve pattern
+  const problemSolve = /错误|报错|error|bug|问题|失败|原因|修复|解决|fix|resolve|调试|debug/i
+  const matches = text.match(new RegExp(problemSolve.source, 'gi')) || []
+  if (matches.length >= 3) score += 0.15
+
+  // Signal 4: Decision signals
+  const decisionSignals = /决定|选择|方案|架构|设计|tradeoff|取舍|决策|重构|优化|迁移|升级/i
+  if (decisionSignals.test(text)) score += 0.1
+
+  // Signal 5: Casual chat penalty
+  const casualSignals = /^(你好|hi|hello|test|嗯|好的|继续|ok|行|可以|没问题)/im
+  const casualCount = (text.match(new RegExp(casualSignals.source, 'gi')) || []).length
+  if (casualCount > messages.length * 0.5) score -= 0.2
+
+  return Math.max(0.1, Math.min(1.0, score))
+}
+
+function saveRawEpisodic(sessionId, transcriptPath) {
+  if (!db) init()
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return false
+
+  const raw = fs.readFileSync(transcriptPath, 'utf-8')
+  const lines = raw.split('\n').filter(Boolean)
+
+  const messages = []
+  const userExcerpts = []
+  const assistantExcerpts = []
+
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line)
+      const msg = entry.message || {}
+      const role = msg.role || entry.type || 'unknown'
+      let content = ''
+      if (typeof msg.content === 'string') content = msg.content
+      else if (Array.isArray(msg.content)) {
+        const tb = msg.content.find(b => b.type === 'text')
+        if (tb) content = tb.text
+      }
+      if (!content || content.length < 3) continue
+      if (content.includes('parentUuid') || content.includes('sidechain')) continue
+      if (content.includes('This session is being continued')) continue
+      if (content.includes('Primary Request and Intent:')) continue
+
+      // Strip angle tags
+      let cleaned = content
+      let prev
+      do {
+        prev = cleaned
+        cleaned = cleaned.replace(/<[\w-]+>[\s\S]*?<\/[\w-]+>/g, '')
+      } while (cleaned !== prev)
+      cleaned = cleaned.replace(/<[\w-]+\/>/g, '').replace(/<\/?[\w-]+>/g, '').trim()
+
+      if (cleaned.length < 3) continue
+
+      messages.push({ role, content: cleaned.substring(0, 2000), ts: entry.timestamp || '' })
+
+      if (role === 'user' && userExcerpts.length < 3) {
+        userExcerpts.push(cleaned.substring(0, 100))
+      }
+      if (role === 'assistant' && assistantExcerpts.length < 3) {
+        assistantExcerpts.push(cleaned.substring(0, 100))
+      }
+    } catch(e) {}
+  }
+
+  if (messages.length < 3) return false
+
+  const keywords = extractTopicKeywords(messages)
+  const importance = calcImportance(messages)
+
+  try {
+    db.prepare(`INSERT OR REPLACE INTO raw_episodic
+      (session_id, message_count, user_excerpt, assistant_excerpt,
+       topic_keywords, importance_score, transcript_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(sessionId, messages.length, userExcerpts.join('|||'),
+           assistantExcerpts.join('|||'), keywords, importance,
+           JSON.stringify(messages))
+    return true
+  } catch(e) {
+    return false
+  }
+}
+
+function searchRawEpisodic(query, limit = 5) {
+  if (!db) init()
+  const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 1)
+  if (keywords.length === 0) return []
+
+  const all = db.prepare('SELECT session_id, user_excerpt, assistant_excerpt, topic_keywords, importance_score, created_at FROM raw_episodic ORDER BY importance_score DESC, created_at DESC LIMIT 200').all()
+
+  const scored = all.map(r => {
+    const txt = [r.topic_keywords, r.user_excerpt, r.assistant_excerpt].join(' ').toLowerCase()
+    let score = 0
+    for (const kw of keywords) {
+      if (txt.includes(kw)) score += 1
+    }
+    return { ...r, score }
+  }).filter(r => r.score > 0)
+
+  scored.sort((a, b) => b.score - a.score || b.importance_score - a.importance_score)
+  return scored.slice(0, limit)
+}
+
+// ---- SMART ELIMINATION ----
+
+function runSmartElimination() {
+  if (!db) init()
+  const now = Date.now()
+  const DAY = 86400000
+
+  // 1. Raw episodic elimination
+  const raws = db.prepare('SELECT id, session_id, created_at, importance_score, compressed, transcript_data FROM raw_episodic ORDER BY created_at').all()
+  let rawDeleted = 0, rawCompressed = 0
+
+  for (const r of raws) {
+    const age = (now - new Date(r.created_at + 'Z').getTime()) / DAY
+
+    if (age > 90 && r.importance_score < 0.7) {
+      db.prepare('DELETE FROM raw_episodic WHERE id = ?').run(r.id)
+      rawDeleted++
+    } else if (age > 30 && r.importance_score < 0.4) {
+      db.prepare('DELETE FROM raw_episodic WHERE id = ?').run(r.id)
+      rawDeleted++
+    } else if (age > 7 && !r.compressed) {
+      // Compress: keep only user/assistant messages, truncate content
+      try {
+        const msgs = JSON.parse(r.transcript_data || '[]')
+        const compressed = msgs
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .map(m => ({ r: m.role === 'user' ? 'u' : 'a', c: m.content.substring(0, 500) }))
+        db.prepare('UPDATE raw_episodic SET transcript_data = ?, compressed = 1 WHERE id = ?')
+          .run(JSON.stringify(compressed), r.id)
+        rawCompressed++
+      } catch(e) {}
+    }
+  }
+
+  // 2. Semantic tier promotion/demotion
+  const semantics = db.prepare(`SELECT key, tier, confidence, effectiveness_score,
+    access_count, updated_at, importance_score FROM semantic WHERE key != '_schema_version'`).all()
+
+  let promoted = 0, demoted = 0, archived = 0
+
+  for (const m of semantics) {
+    const daysSinceUpdate = (now - new Date(m.updated_at + 'Z').getTime()) / DAY
+    const conf = m.confidence || 0.5
+    const eff = m.effectiveness_score || 0.5
+    const acc = m.access_count || 0
+
+    // Promotion: warm → hot (high access + high effectiveness)
+    if (m.tier === 'warm' && acc >= 3 && eff >= 0.6 && conf >= 0.5) {
+      db.prepare("UPDATE semantic SET tier = 'hot', tier_updated_at = datetime('now') WHERE key = ?").run(m.key)
+      promoted++
+    }
+    // Promotion: cold → warm (was accessed)
+    if (m.tier === 'cold' && acc >= 1) {
+      db.prepare("UPDATE semantic SET tier = 'warm', tier_updated_at = datetime('now') WHERE key = ?").run(m.key)
+      promoted++
+    }
+
+    // Demotion: hot → warm (30 days no update + low access)
+    if (m.tier === 'hot' && daysSinceUpdate > 30 && acc < 2) {
+      db.prepare("UPDATE semantic SET tier = 'warm', tier_updated_at = datetime('now') WHERE key = ?").run(m.key)
+      demoted++
+    }
+    // Demotion: warm → cold (60 days no update)
+    if (m.tier === 'warm' && daysSinceUpdate > 60) {
+      db.prepare("UPDATE semantic SET tier = 'cold', tier_updated_at = datetime('now') WHERE key = ?").run(m.key)
+      demoted++
+    }
+
+    // Archive: cold + low confidence + 30 days no update
+    if (m.tier === 'cold' && conf < 0.15 && daysSinceUpdate > 30) {
+      archiveSemantic(m.key)
+      archived++
+    }
+  }
+
+  // 3. Time decay (different rates per tier)
+  db.prepare(`UPDATE semantic SET confidence = MAX(0.1, confidence * 0.98)
+    WHERE tier = 'warm' AND key != '_schema_version'`).run()
+  db.prepare(`UPDATE semantic SET confidence = MAX(0.1, confidence * 0.95)
+    WHERE tier = 'cold' AND key != '_schema_version'`).run()
+
+  return { rawDeleted, rawCompressed, promoted, demoted, archived }
+}
+
+function searchTiered(query, limit = 5) {
+  if (!db) init()
+
+  // Level 1: Semantic (FTS5)
+  let results = searchHybrid(query, limit)
+  if (results.length >= limit) return { level: 'semantic', results, episodes: [], rawResults: [] }
+
+  // Level 2: Episodic summaries (keyword match)
+  const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 1)
+  let episodes = []
+  if (keywords.length > 0) {
+    const allEpisodes = db.prepare('SELECT session_id, summary, created_at FROM episodic ORDER BY created_at DESC LIMIT 100').all()
+    episodes = allEpisodes.filter(ep => {
+      const txt = (ep.summary || '').toLowerCase()
+      return keywords.some(kw => txt.includes(kw))
+    }).slice(0, limit - results.length)
+  }
+
+  // Level 3: Raw episodic
+  const rawResults = searchRawEpisodic(query, limit - results.length - episodes.length)
+
+  return {
+    level: results.length > 0 ? 'semantic+episodic' : episodes.length > 0 ? 'episodic+raw' : 'raw',
+    results,
+    episodes,
+    rawResults
+  }
+}
+
+function archiveSemantic(key) {
+  try {
+    const mem = db.prepare('SELECT * FROM semantic WHERE key = ?').get(key)
+    if (!mem) return
+
+    const archiveDir = path.join(ROOT, 'memory', 'archive')
+    if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true })
+
+    const archiveFile = path.join(archiveDir, `archived_${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+    const existing = []
+    try { Object.assign(existing, JSON.parse(fs.readFileSync(archiveFile, 'utf-8'))) } catch(e) {}
+    existing.push(mem)
+    fs.writeFileSync(archiveFile, JSON.stringify(existing, null, 2))
+
+    db.prepare('DELETE FROM semantic WHERE key = ?').run(key)
+    db.prepare('DELETE FROM semantic_fts WHERE rowid = (SELECT rowid FROM semantic_fts WHERE key = ?)').run(key)
+    db.prepare('DELETE FROM feedback_events WHERE memory_key = ?').run(key)
+  } catch(e) {}
 }
 
 function searchBM25(query, limit = 10) {
@@ -405,12 +708,51 @@ function compactMemories() {
 }
 
 function getStats() {
+  if (!db) init()
   const semanticCount = db.prepare('SELECT COUNT(*) as c FROM semantic').get().c
   const proceduralCount = db.prepare('SELECT COUNT(*) as c FROM procedural').get().c
   const skillCount = db.prepare('SELECT COUNT(*) as c FROM skill_index').get().c
   const evoCount = db.prepare('SELECT COUNT(*) as c FROM evolution_log').get().c
   const episodeCount = listEpisodes(1000).length
-  return { semanticCount, proceduralCount, skillCount, evoCount, episodeCount }
+  const rawEpisodicCount = db.prepare('SELECT COUNT(*) as c FROM raw_episodic').get().c
+  // Tier distribution
+  const tierDist = db.prepare("SELECT tier, COUNT(*) as c FROM semantic WHERE key != '_schema_version' GROUP BY tier").all()
+  const tierStats = Object.fromEntries(tierDist.map(t => [t.tier || 'hot', t.c]))
+  return { semanticCount, proceduralCount, skillCount, evoCount, episodeCount, rawEpisodicCount, tierStats }
+}
+
+function checkStorageBudget() {
+  if (!db) init()
+  const DB_PATH = path.join(ROOT, 'memory.db')
+  const stat = fs.statSync(DB_PATH)
+  const sizeMB = stat.size / (1024 * 1024)
+
+  if (sizeMB > 100) {
+    // Emergency cleanup: delete oldest low-importance raw_episodic
+    db.prepare(`DELETE FROM raw_episodic WHERE importance_score < 0.5
+      AND id IN (SELECT id FROM raw_episodic ORDER BY created_at ASC LIMIT 100)`).run()
+    db.exec('VACUUM')
+    return { sizeMB, budget: 'critical', action: 'emergency_cleanup' }
+  } else if (sizeMB > 50) {
+    // Gentle cleanup: compress old uncompressed records
+    const uncompressed = db.prepare('SELECT COUNT(*) as c FROM raw_episodic WHERE compressed = 0 AND created_at < datetime("now", "-14 days")').get().c
+    if (uncompressed > 0) {
+      const oldRecords = db.prepare('SELECT id, transcript_data FROM raw_episodic WHERE compressed = 0 AND created_at < datetime("now", "-14 days") LIMIT 50').all()
+      for (const r of oldRecords) {
+        try {
+          const msgs = JSON.parse(r.transcript_data || '[]')
+          const compressed = msgs
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .map(m => ({ r: m.role === 'user' ? 'u' : 'a', c: m.content.substring(0, 300) }))
+          db.prepare('UPDATE raw_episodic SET transcript_data = ?, compressed = 1 WHERE id = ?')
+            .run(JSON.stringify(compressed), r.id)
+        } catch(e) {}
+      }
+    }
+    return { sizeMB, budget: 'warning', action: 'gentle_cleanup', uncompressed }
+  }
+
+  return { sizeMB, budget: 'ok', action: 'none' }
 }
 
 // ---- FEEDBACK LOOP ----
@@ -624,5 +966,9 @@ module.exports = {
   logEvolution, detectPatterns, compactMemories, getStats,
   recordFeedback, detectMemoryReferences, rankByEffectiveness, getMemoryFeedback, pruneIneffective,
   recordSkillFeedback, upsertSkillPref, getSkillPrefs, getSkillRankings,
-  formatSkillPrefsForAI, syncSkillPrefsToFile
+  formatSkillPrefsForAI, syncSkillPrefsToFile,
+  // Raw episodic storage
+  extractTopicKeywords, calcImportance, saveRawEpisodic, searchRawEpisodic,
+  // Smart elimination
+  runSmartElimination, archiveSemantic, searchTiered, checkStorageBudget
 }
